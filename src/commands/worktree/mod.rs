@@ -59,9 +59,14 @@ pub fn execute_worktree_command(
 
     // Inject --recursive if the protocol option was set but the flag wasn't in the
     // command args (the host strips global flags like --recursive before forwarding).
-    // Only inject for `create` — it's the only subcommand that declares this flag.
+    // Inject only for subcommands that explicitly support recursive behavior.
     let is_create = matches!(clap_args.first().map(String::as_str), Some("create"));
-    if recursive && is_create && !clap_args.iter().any(|a| a == "--recursive" || a == "-r") {
+    let supports_recursive = matches!(
+        clap_args.first().map(String::as_str),
+        Some("create" | "list" | "status")
+    );
+    if recursive && supports_recursive && !clap_args.iter().any(|a| a == "--recursive" || a == "-r")
+    {
         clap_args.push("--recursive".to_string());
     }
     if dry_run && is_create && !clap_args.iter().any(|a| a == "--dry-run") {
@@ -205,6 +210,12 @@ fn write_worktree_help(w: &mut dyn std::io::Write) {
         "  --ttl <DURATION>         Time-to-live (30s, 5m, 1h, 2d, 1w)"
     );
     let _ = writeln!(w, "  --meta <KEY=VALUE>       Store custom metadata");
+    let _ = writeln!(w);
+    let _ = writeln!(w, "LIST / STATUS OPTIONS:");
+    let _ = writeln!(
+        w,
+        "  -r, --recursive          Include repositories nested beneath worktree repos"
+    );
     let _ = writeln!(w);
     let _ = writeln!(w, "REMOVE OPTIONS:");
     let _ = writeln!(

@@ -124,10 +124,17 @@ pub struct DestroyArgs {
 }
 
 #[derive(Args)]
-pub struct ListArgs {}
+pub struct ListArgs {
+    /// Include realized repositories nested beneath other worktree repositories
+    #[arg(long, short = 'r')]
+    pub recursive: bool,
+}
 
 #[derive(Args)]
 pub struct StatusArgs {
+    /// Include realized repositories nested beneath other worktree repositories
+    #[arg(long, short = 'r')]
+    pub recursive: bool,
     /// Worktree name
     pub name: String,
 }

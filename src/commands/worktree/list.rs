@@ -11,6 +11,7 @@ use meta_git_lib::worktree::types::*;
 
 use super::cli_types::ListArgs;
 
+/// Render worktree sets, failing recursive inventory atomically on observation errors.
 pub(crate) fn handle_list(args: ListArgs, _verbose: bool, json: bool) -> Result<()> {
     let meta_dir = find_meta_dir();
     let worktree_root = resolve_worktree_root(meta_dir.as_deref())?;

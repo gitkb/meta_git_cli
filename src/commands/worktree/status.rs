@@ -10,6 +10,7 @@ use meta_git_lib::worktree::types::*;
 
 use super::cli_types::StatusArgs;
 
+/// Render a named set, preserving legacy defaults unless recursive is requested.
 pub(crate) fn handle_status(args: StatusArgs, _verbose: bool, json: bool) -> Result<()> {
     let name = &args.name;
 

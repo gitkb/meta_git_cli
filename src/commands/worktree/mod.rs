@@ -106,6 +106,7 @@ pub fn execute_worktree_command(
     }
 }
 
+/// Dispatch parsed worktree commands while retaining command-specific policies.
 fn handle_worktree_command(
     command: WorktreeCommands,
     verbose: bool,
@@ -173,6 +174,7 @@ pub fn eprint_worktree_help() {
     write_worktree_help(&mut std::io::stderr());
 }
 
+/// Write top-level help including recursive inventory usage.
 fn write_worktree_help(w: &mut dyn std::io::Write) {
     let _ = writeln!(w, "Manage git worktrees across repos");
     let _ = writeln!(w);

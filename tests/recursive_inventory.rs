@@ -6,6 +6,7 @@ use std::{
     process::{Command, Stdio},
 };
 
+/// Run a Git fixture command and surface diagnostics on failure.
 fn git(path: &Path, args: &[&str]) {
     let out = Command::new("git")
         .arg("-C")
@@ -20,6 +21,7 @@ fn git(path: &Path, args: &[&str]) {
     );
 }
 
+/// Invoke the public plugin protocol with isolated worktree and data roots.
 fn request(root: &Path, command: &str, recursive: bool, explicit: bool) -> std::process::Output {
     let mut args = if command == "status" {
         vec!["example"]
@@ -51,6 +53,7 @@ fn request(root: &Path, command: &str, recursive: bool, explicit: bool) -> std::
 }
 
 #[test]
+/// Verify real nested members, option forwarding and atomic error output.
 fn public_list_status_recursive_protocol_and_explicit_flags() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
@@ -137,5 +140,20 @@ fn public_list_status_recursive_protocol_and_explicit_flags() {
             out.stdout.is_empty(),
             "must not emit a partial successful inventory"
         );
+    }
+}
+
+/// A missing configured root is empty for list and an error for named status.
+#[test]
+fn missing_worktree_root_preserves_list_and_status_contracts() {
+    let temp = tempfile::tempdir().unwrap();
+    for recursive in [false, true] {
+        let out = request(temp.path(), "list", recursive, false);
+        assert!(out.status.success());
+        let value: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(value, json!({"worktrees": []}));
+        let out = request(temp.path(), "status", recursive, false);
+        assert!(!out.status.success());
+        assert!(out.stdout.is_empty());
     }
 }

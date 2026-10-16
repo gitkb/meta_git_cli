@@ -133,10 +133,28 @@ fn public_list_status_recursive_protocol_and_explicit_flags() {
         }
     }
     fs::write(set.join("open-source/atc/.git"), "broken").unwrap();
+    let healthy_set = root.join("sets/healthy");
+    git(
+        &root.join("source0"),
+        &[
+            "worktree",
+            "add",
+            "-qb",
+            "healthy",
+            healthy_set.to_str().unwrap(),
+        ],
+    );
     let out = request(root, "list", true, false);
     assert!(out.status.success());
     let value: Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(value["worktrees"], json!([]));
+    let worktrees = value["worktrees"].as_array().unwrap();
+    assert_eq!(worktrees.len(), 1);
+    assert_eq!(worktrees[0]["name"], "healthy");
+    assert_eq!(worktrees[0]["root"], healthy_set.to_str().unwrap());
+    assert_eq!(
+        worktrees[0]["repos"],
+        json!([{"alias": ".", "branch": "healthy", "dirty": false}])
+    );
     assert_eq!(value["warnings"].as_array().unwrap().len(), 1);
     assert_eq!(value["warnings"][0]["name"], "example");
     assert_eq!(value["warnings"][0]["root"], set.to_str().unwrap());

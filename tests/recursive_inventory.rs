@@ -53,7 +53,7 @@ fn request(root: &Path, command: &str, recursive: bool, explicit: bool) -> std::
 }
 
 #[test]
-/// Verify real nested members, option forwarding and atomic error output.
+/// Verify real nested members, option forwarding and command-specific error output.
 fn public_list_status_recursive_protocol_and_explicit_flags() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
@@ -133,14 +133,24 @@ fn public_list_status_recursive_protocol_and_explicit_flags() {
         }
     }
     fs::write(set.join("open-source/atc/.git"), "broken").unwrap();
-    for command in ["list", "status"] {
-        let out = request(root, command, true, false);
-        assert!(!out.status.success());
-        assert!(
-            out.stdout.is_empty(),
-            "must not emit a partial successful inventory"
-        );
-    }
+    let out = request(root, "list", true, false);
+    assert!(out.status.success());
+    let value: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["worktrees"], json!([]));
+    assert_eq!(value["warnings"].as_array().unwrap().len(), 1);
+    assert_eq!(value["warnings"][0]["name"], "example");
+    assert_eq!(value["warnings"][0]["root"], set.to_str().unwrap());
+    assert!(value["warnings"][0]["message"]
+        .as_str()
+        .unwrap()
+        .contains("Invalid .git file format"));
+
+    let out = request(root, "status", true, false);
+    assert!(!out.status.success());
+    assert!(
+        out.stdout.is_empty(),
+        "named status must not emit an incomplete successful inventory"
+    );
 }
 
 /// A missing configured root is empty for list and an error for named status.

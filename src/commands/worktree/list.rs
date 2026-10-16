@@ -11,7 +11,22 @@ use meta_git_lib::worktree::types::*;
 
 use super::cli_types::ListArgs;
 
-/// Render worktree sets, failing recursive inventory atomically on observation errors.
+#[derive(serde::Serialize)]
+struct ListWarning {
+    name: String,
+    root: String,
+    message: String,
+}
+
+#[derive(serde::Serialize)]
+struct ListWithWarnings {
+    #[serde(flatten)]
+    listing: ListOutput,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    warnings: Vec<ListWarning>,
+}
+
+/// Render healthy worktree sets and report unavailable sets without aborting the list.
 pub(crate) fn handle_list(args: ListArgs, _verbose: bool, json: bool) -> Result<()> {
     let meta_dir = find_meta_dir();
     let worktree_root = resolve_worktree_root(meta_dir.as_deref())?;
@@ -36,10 +51,7 @@ pub(crate) fn handle_list(args: ListArgs, _verbose: bool, json: bool) -> Result<
     let mut dir_entries = Vec::new();
     for entry in std::fs::read_dir(&worktree_root)? {
         if args.recursive {
-            let entry = entry?;
-            if entry.file_type()?.is_dir() {
-                dir_entries.push(entry);
-            }
+            dir_entries.push(entry?);
         } else if let Ok(entry) = entry {
             if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
                 dir_entries.push(entry);
@@ -47,9 +59,12 @@ pub(crate) fn handle_list(args: ListArgs, _verbose: bool, json: bool) -> Result<
         }
     }
 
-    let mut entries: Vec<ListEntry> = dir_entries
+    let results: Vec<Result<Option<ListEntry>>> = dir_entries
         .par_iter()
         .map(|entry| -> Result<Option<ListEntry>> {
+            if args.recursive && !entry.file_type()?.is_dir() {
+                return Ok(None);
+            }
             let name = entry.file_name().to_string_lossy().to_string();
             let wt_dir = entry.path();
 
@@ -103,21 +118,44 @@ pub(crate) fn handle_list(args: ListArgs, _verbose: bool, json: bool) -> Result<
                 custom,
             }))
         })
-        .collect::<Result<Vec<_>>>()?
-        .into_iter()
-        .flatten()
         .collect();
 
-    // Sort by name for deterministic output
+    let mut entries = Vec::new();
+    let mut warnings = Vec::new();
+    for (entry, result) in dir_entries.iter().zip(results) {
+        match result {
+            Ok(Some(entry)) => entries.push(entry),
+            Ok(None) => {}
+            Err(error) if args.recursive => warnings.push(ListWarning {
+                name: entry.file_name().to_string_lossy().into_owned(),
+                root: entry.path().display().to_string(),
+                message: format!("{error:#}"),
+            }),
+            Err(error) => return Err(error),
+        }
+    }
+
+    // Sort both collections by name for deterministic output.
     entries.sort_by(|a, b| a.name.cmp(&b.name));
+    warnings.sort_by(|a, b| a.name.cmp(&b.name));
 
     if json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&ListOutput { worktrees: entries })?
+            serde_json::to_string_pretty(&ListWithWarnings {
+                listing: ListOutput { worktrees: entries },
+                warnings,
+            })?
         );
-    } else if entries.is_empty() {
-        println!("No worktrees found.");
+        return Ok(());
+    }
+
+    if entries.is_empty() {
+        if warnings.is_empty() {
+            println!("No worktrees found.");
+        } else {
+            println!("No readable worktree sets found.");
+        }
     } else {
         for e in &entries {
             let mut header = e.name.bold().to_string();
@@ -145,6 +183,9 @@ pub(crate) fn handle_list(args: ListArgs, _verbose: bool, json: bool) -> Result<
             }
             println!();
         }
+    }
+    for warning in &warnings {
+        eprintln!("Warning: {}: {}", warning.name, warning.message);
     }
 
     Ok(())

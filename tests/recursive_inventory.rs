@@ -57,7 +57,7 @@ fn request(root: &Path, command: &str, recursive: bool, explicit: bool) -> std::
 fn public_list_status_recursive_protocol_and_explicit_flags() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
-    let set = root.join("sets/example");
+    let set = root.join("sets").join("example");
     for (index, alias) in [".", "open-source", "open-source/atc", "other/atc"]
         .iter()
         .enumerate()
@@ -133,7 +133,7 @@ fn public_list_status_recursive_protocol_and_explicit_flags() {
         }
     }
     fs::write(set.join("open-source/atc/.git"), "broken").unwrap();
-    let healthy_set = root.join("sets/healthy");
+    let healthy_set = root.join("sets").join("healthy");
     git(
         &root.join("source0"),
         &[

@@ -3,27 +3,43 @@ use colored::*;
 use rayon::prelude::*;
 
 use meta_git_lib::worktree::git_ops::*;
-use meta_git_lib::worktree::helpers::discover_and_validate_worktree;
+use meta_git_lib::worktree::helpers::{
+    discover_and_validate_worktree, resolve_existing_worktree, validate_worktree_name,
+};
 use meta_git_lib::worktree::types::*;
 
 use super::cli_types::StatusArgs;
 
+/// Render a named set, preserving legacy defaults unless recursive is requested.
 pub(crate) fn handle_status(args: StatusArgs, _verbose: bool, json: bool) -> Result<()> {
     let name = &args.name;
 
-    let repos = discover_and_validate_worktree(name)?;
+    let repos = if args.recursive {
+        validate_worktree_name(name)?;
+        let ctx = resolve_existing_worktree(name)?;
+        let repos = meta_cli::worktree::discover_worktree_repos_recursive(&ctx.wt_dir)?;
+        anyhow::ensure!(!repos.is_empty(), "No repos found in worktree '{name}'");
+        repos
+    } else {
+        discover_and_validate_worktree(name)?
+    };
 
     let statuses: Vec<StatusRepoEntry> = repos
         .par_iter()
         .map(|r| {
-            let summary = git_status_summary(&r.path).unwrap_or(GitStatusSummary {
-                dirty: false,
-                modified_files: vec![],
-                untracked_count: 0,
-            });
+            let observed = git_status_summary(&r.path);
+            let summary = if args.recursive {
+                observed?
+            } else {
+                observed.unwrap_or(GitStatusSummary {
+                    dirty: false,
+                    modified_files: vec![],
+                    untracked_count: 0,
+                })
+            };
             let (ahead, behind) = git_ahead_behind(&r.path).unwrap_or((0, 0));
 
-            StatusRepoEntry {
+            Ok(StatusRepoEntry {
                 alias: r.alias.clone(),
                 path: r.path.display().to_string(),
                 branch: r.branch.clone(),
@@ -33,9 +49,9 @@ pub(crate) fn handle_status(args: StatusArgs, _verbose: bool, json: bool) -> Res
                 ahead,
                 behind,
                 modified_files: summary.modified_files,
-            }
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>>>()?;
 
     if json {
         let output = StatusOutput {

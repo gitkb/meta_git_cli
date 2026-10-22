@@ -146,8 +146,8 @@ pub struct MembersArgs {
     /// Include realized repositories nested beneath other worktree repositories
     #[arg(long, short = 'r', required = true)]
     pub recursive: bool,
-    /// Worktree name
-    pub name: String,
+    /// Worktree name (defaults to the enclosing .worktrees/<name> set)
+    pub name: Option<String>,
 }
 
 #[derive(Args)]

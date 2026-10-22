@@ -254,3 +254,111 @@ fn membership_only_protocol_runs_without_git_and_rejects_partial_membership() {
     );
     assert!(!bin.join("git.calls").exists());
 }
+
+/// Inference selects the enclosing physical set, including from deep descendants,
+/// without consulting a different configured worktree root or launching Git.
+#[cfg(unix)]
+#[test]
+fn membership_infers_enclosing_set_without_git_and_requires_context() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let source = root.join("source");
+    fs::create_dir(&source).unwrap();
+    git(&source, &["init", "-q"]);
+    git(
+        &source,
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "initial",
+        ],
+    );
+    let set = root.join(".worktrees/example");
+    fs::create_dir_all(set.parent().unwrap()).unwrap();
+    git(
+        &source,
+        &["worktree", "add", "-qb", "topic", set.to_str().unwrap()],
+    );
+    let nested = set.join("deep/directory");
+    fs::create_dir_all(&nested).unwrap();
+    let other = root.join("configured/other");
+    fs::create_dir_all(other.parent().unwrap()).unwrap();
+    git(
+        &source,
+        &["worktree", "add", "-qb", "other", other.to_str().unwrap()],
+    );
+    let bin = root.join("bin");
+    fs::create_dir(&bin).unwrap();
+    let fake_git = bin.join("git");
+    fs::write(
+        &fake_git,
+        "#!/bin/sh\nprintf called >> \"$0.calls\"\nexit 1\n",
+    )
+    .unwrap();
+    fs::set_permissions(&fake_git, fs::Permissions::from_mode(0o700)).unwrap();
+    let invoke = |cwd: &Path, args: Vec<&str>, recursive: bool| {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_meta-git"))
+            .arg("--meta-plugin-exec")
+            .current_dir(cwd)
+            .env("PATH", &bin)
+            .env("META_WORKTREES", root.join("configured"))
+            .env("META_DATA_DIR", root.join("data"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let request = json!({"command": "git worktree members", "args": args,
+            "cwd": cwd, "options": {"json_output": true, "recursive": recursive}});
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(request.to_string().as_bytes())
+            .unwrap();
+        child.wait_with_output().unwrap()
+    };
+    for cwd in [&set, &nested] {
+        for (args, recursive) in [(vec![], true), (vec!["--recursive"], false)] {
+            let out = invoke(cwd, args, recursive);
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let value: Value = serde_json::from_slice(&out.stdout).unwrap();
+            assert_eq!(value["name"], "example");
+            assert_eq!(value["repos"][0]["path"], set.to_str().unwrap());
+        }
+    }
+    let explicit = invoke(&nested, vec!["other"], true);
+    assert!(explicit.status.success());
+    let value: Value = serde_json::from_slice(&explicit.stdout).unwrap();
+    assert_eq!(value["name"], "other");
+    assert_eq!(value["repos"][0]["path"], other.to_str().unwrap());
+
+    let outside = invoke(&source, vec![], true);
+    assert!(!outside.status.success());
+    assert!(outside.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&outside.stderr).contains("Worktree name required"));
+    assert!(
+        !invoke(&set, vec![], false).status.success(),
+        "recursive remains required"
+    );
+
+    fs::create_dir(set.join("broken")).unwrap();
+    fs::write(set.join("broken/.git"), "broken").unwrap();
+    let malformed = invoke(&nested, vec![], true);
+    assert!(!malformed.status.success());
+    assert!(
+        malformed.stdout.is_empty(),
+        "inference must not mask invalid membership"
+    );
+    assert!(!bin.join("git.calls").exists(), "inference launched Git");
+}

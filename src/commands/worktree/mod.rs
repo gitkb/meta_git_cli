@@ -229,6 +229,10 @@ fn write_worktree_help(w: &mut dyn std::io::Write) {
         w,
         "MEMBERS requires --recursive and omits branch/status probes."
     );
+    let _ = writeln!(
+        w,
+        "  NAME defaults to the enclosing .worktrees/<name> set for MEMBERS."
+    );
     let _ = writeln!(w, "REMOVE OPTIONS:");
     let _ = writeln!(
         w,

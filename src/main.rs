@@ -73,6 +73,7 @@ fn main() {
                 "git worktree destroy".to_string(),
                 "git worktree list".to_string(),
                 "git worktree status".to_string(),
+                "git worktree members".to_string(),
                 "git worktree diff".to_string(),
                 "git worktree exec".to_string(),
                 "git worktree prune".to_string(),

@@ -23,7 +23,7 @@ fn git(path: &Path, args: &[&str]) {
 
 /// Invoke the public plugin protocol with isolated worktree and data roots.
 fn request(root: &Path, command: &str, recursive: bool, explicit: bool) -> std::process::Output {
-    let mut args = if command == "status" {
+    let mut args = if matches!(command, "status" | "members") {
         vec!["example"]
     } else {
         vec![]
@@ -33,7 +33,11 @@ fn request(root: &Path, command: &str, recursive: bool, explicit: bool) -> std::
     }
     let request = json!({"command": format!("git worktree {command}"), "args": args,
         "cwd": root, "options": {"json_output": true, "recursive": recursive}});
-    let mut child = Command::new(env!("CARGO_BIN_EXE_meta-git"))
+    let mut executable = Command::new(env!("CARGO_BIN_EXE_meta-git"));
+    if root.join("bin").is_dir() {
+        executable.env("PATH", root.join("bin"));
+    }
+    let mut child = executable
         .arg("--meta-plugin-exec")
         .current_dir(root)
         .env("META_WORKTREES", root.join("sets"))
@@ -184,4 +188,69 @@ fn missing_worktree_root_preserves_list_and_status_contracts() {
         assert!(!out.status.success());
         assert!(out.stdout.is_empty());
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn membership_only_protocol_runs_without_git_and_rejects_partial_membership() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let source = root.join("source");
+    fs::create_dir(&source).unwrap();
+    git(&source, &["init", "-q"]);
+    git(
+        &source,
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "initial",
+        ],
+    );
+    let set = root.join("sets/example");
+    fs::create_dir_all(set.parent().unwrap()).unwrap();
+    git(
+        &source,
+        &["worktree", "add", "-qb", "topic", set.to_str().unwrap()],
+    );
+    fs::write(set.join("untracked"), "dirty, deliberately unobserved").unwrap();
+    let bin = root.join("bin");
+    fs::create_dir(&bin).unwrap();
+    let fake_git = bin.join("git");
+    fs::write(
+        &fake_git,
+        "#!/bin/sh\nprintf called >> \"$0.calls\"\nexit 1\n",
+    )
+    .unwrap();
+    fs::set_permissions(&fake_git, fs::Permissions::from_mode(0o700)).unwrap();
+    for (recursive, explicit) in [(true, false), (false, true)] {
+        let out = request(&root, "members", recursive, explicit);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let value: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(value["name"], "example");
+        assert_eq!(value["repos"].as_array().unwrap().len(), 1);
+        assert_eq!(value["repos"][0]["alias"], ".");
+        assert_eq!(value["repos"][0]["path"], set.to_str().unwrap());
+        assert!(value["repos"][0].get("branch").is_none());
+        assert!(value["repos"][0].get("dirty").is_none());
+    }
+    assert!(!bin.join("git.calls").exists(), "membership launched Git");
+    fs::create_dir(set.join("broken")).unwrap();
+    fs::write(set.join("broken/.git"), "broken").unwrap();
+    let out = request(&root, "members", true, false);
+    assert!(!out.status.success());
+    assert!(
+        out.stdout.is_empty(),
+        "must not report a partial successful inventory"
+    );
+    assert!(!bin.join("git.calls").exists());
 }

@@ -21,6 +21,8 @@ pub enum WorktreeCommands {
     List(ListArgs),
     /// Show detailed status of a worktree set
     Status(StatusArgs),
+    /// List realized membership without Git status or branch probes
+    Members(MembersArgs),
     /// Show cross-repo diff vs base branch
     Diff(DiffArgs),
     /// Run a command across worktree repos
@@ -134,6 +136,15 @@ pub struct ListArgs {
 pub struct StatusArgs {
     /// Include realized repositories nested beneath other worktree repositories
     #[arg(long, short = 'r')]
+    pub recursive: bool,
+    /// Worktree name
+    pub name: String,
+}
+
+#[derive(Args)]
+pub struct MembersArgs {
+    /// Include realized repositories nested beneath other worktree repositories
+    #[arg(long, short = 'r', required = true)]
     pub recursive: bool,
     /// Worktree name
     pub name: String,

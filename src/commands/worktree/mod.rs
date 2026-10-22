@@ -6,7 +6,6 @@ mod create;
 mod diff;
 mod exec;
 mod list;
-mod members;
 mod prune;
 mod remove;
 mod status;
@@ -64,7 +63,7 @@ pub fn execute_worktree_command(
     let is_create = matches!(clap_args.first().map(String::as_str), Some("create"));
     let supports_recursive = matches!(
         clap_args.first().map(String::as_str),
-        Some("create" | "list" | "status" | "members")
+        Some("create" | "list" | "status")
     );
     if recursive && supports_recursive && !clap_args.iter().any(|a| a == "--recursive" || a == "-r")
     {
@@ -122,7 +121,6 @@ fn handle_worktree_command(
         }
         WorktreeCommands::List(args) => list::handle_list(args, verbose, json),
         WorktreeCommands::Status(args) => status::handle_status(args, verbose, json),
-        WorktreeCommands::Members(args) => members::handle_members(args, json),
         WorktreeCommands::Diff(args) => diff::handle_diff(args, verbose, json),
         WorktreeCommands::Exec(args) => exec::handle_exec(args, verbose, json),
         WorktreeCommands::Prune(args) => prune::handle_prune(args, verbose, json, global_strict),
@@ -186,12 +184,11 @@ fn write_worktree_help(w: &mut dyn std::io::Write) {
     let _ = writeln!(w, "  create   Create a new worktree set");
     let _ = writeln!(w, "  add      Add a repo to an existing worktree set");
     let _ = writeln!(w, "  remove   Remove a worktree set");
-    let _ = writeln!(w, "  list     List all worktree sets");
-    let _ = writeln!(w, "  status   Show detailed status of a worktree set");
     let _ = writeln!(
         w,
-        "  members  List realized membership without Git status probes"
+        "  list     List worktree sets (current set when inside one)"
     );
+    let _ = writeln!(w, "  status   Show detailed status of a worktree set");
     let _ = writeln!(w, "  diff     Show cross-repo diff vs base branch");
     let _ = writeln!(w, "  exec     Run a command across worktree repos");
     let _ = writeln!(w, "  prune    Remove expired/orphaned worktrees");
@@ -219,7 +216,7 @@ fn write_worktree_help(w: &mut dyn std::io::Write) {
     );
     let _ = writeln!(w, "  --meta <KEY=VALUE>       Store custom metadata");
     let _ = writeln!(w);
-    let _ = writeln!(w, "LIST / STATUS / MEMBERS OPTIONS:");
+    let _ = writeln!(w, "LIST / STATUS OPTIONS:");
     let _ = writeln!(
         w,
         "  -r, --recursive          Include repositories nested beneath worktree repos"
@@ -227,11 +224,11 @@ fn write_worktree_help(w: &mut dyn std::io::Write) {
     let _ = writeln!(w);
     let _ = writeln!(
         w,
-        "MEMBERS requires --recursive and omits branch/status probes."
+        "LIST [NAME] defaults to the enclosing set, or all sets outside a worktree."
     );
     let _ = writeln!(
         w,
-        "  NAME defaults to the enclosing .worktrees/<name> set for MEMBERS."
+        "  --metadata-only          List membership paths without Git-state probes"
     );
     let _ = writeln!(w, "REMOVE OPTIONS:");
     let _ = writeln!(

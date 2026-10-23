@@ -1,24 +1,25 @@
 use anyhow::Result;
 use colored::*;
-use std::collections::HashMap;
+use std::path::Path;
 
-use meta_cli::worktree::discover_worktree_repos;
+use meta_cli::worktree::{discover_worktree_repos, WorktreeRepoInfo};
 use meta_git_lib::worktree::helpers::*;
 
 use super::cli_types::{CreateArgs, DestroyArgs, ExecArgs};
 use crate::git_env;
 
+/// Runs in each of `repos`, naming them by their path from `wt_dir`.
 fn build_loop_config(
-    directories: Vec<String>,
+    wt_dir: &Path,
+    repos: &[WorktreeRepoInfo],
     include_filters: Vec<String>,
     exclude_filters: Vec<String>,
     parallel: bool,
     verbose: bool,
     json: bool,
-    env: Option<HashMap<String, String>>,
 ) -> loop_lib::LoopConfig {
     loop_lib::LoopConfig {
-        directories,
+        directories: repos.iter().map(|r| r.path.display().to_string()).collect(),
         ignore: vec![],
         include_filters: if include_filters.is_empty() {
             None
@@ -37,9 +38,9 @@ fn build_loop_config(
         json_output: json,
         add_aliases_to_global_looprc: false,
         spawn_stagger_ms: 0,
-        env,
+        env: Some(git_env::git_env()),
         max_parallel: None,
-        root_dir: None, // Worktree exec paths don't use "." convention
+        root_dir: Some(wt_dir.to_path_buf()),
     }
 }
 
@@ -83,17 +84,15 @@ pub(crate) fn handle_exec(args: ExecArgs, verbose: bool, json: bool) -> Result<(
     let name = &args.name;
     let repos = discover_and_validate_worktree(name)?;
 
-    let directories: Vec<String> = repos.iter().map(|r| r.path.display().to_string()).collect();
-
     let command_str = args.command.join(" ");
     let config = build_loop_config(
-        directories,
+        &resolve_existing_worktree(name)?.wt_dir,
+        &repos,
         args.include,
         args.exclude,
         args.parallel,
         verbose,
         json,
-        Some(git_env::git_env()),
     );
 
     loop_lib::run(&config, &command_str)?;
@@ -152,17 +151,16 @@ fn handle_ephemeral_exec(args: ExecArgs, verbose: bool, json: bool) -> Result<()
 
     // Run the command
     let repos = discover_worktree_repos(&wt_dir)?;
-    let directories: Vec<String> = repos.iter().map(|r| r.path.display().to_string()).collect();
 
     let command_str = cmd_parts.join(" ");
     let config = build_loop_config(
-        directories,
+        &wt_dir,
+        &repos,
         include_filters,
         exclude_filters,
         parallel,
         verbose,
         json,
-        Some(git_env::git_env()),
     );
 
     let exec_result = loop_lib::run(&config, &command_str);

@@ -17,7 +17,7 @@ pub enum WorktreeCommands {
     /// Remove a worktree set (alias for remove)
     #[command(hide = true)]
     Destroy(DestroyArgs),
-    /// List all worktree sets
+    /// List worktree sets (defaults to the current set when inside one)
     List(ListArgs),
     /// Show detailed status of a worktree set
     Status(StatusArgs),
@@ -125,9 +125,16 @@ pub struct DestroyArgs {
 
 #[derive(Args)]
 pub struct ListArgs {
+    /// Worktree name (defaults to the current set inside .worktrees/<name>)
+    pub name: Option<String>,
+
     /// Include realized repositories nested beneath other worktree repositories
     #[arg(long, short = 'r')]
     pub recursive: bool,
+
+    /// Return membership paths without observing branches or Git status
+    #[arg(long)]
+    pub metadata_only: bool,
 }
 
 #[derive(Args)]

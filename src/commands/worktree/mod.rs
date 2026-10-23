@@ -229,6 +229,7 @@ fn write_worktree_help(w: &mut dyn std::io::Write) {
         "  -r, --recursive          Include repositories nested beneath worktree repos"
     );
     let _ = writeln!(w);
+    let _ = writeln!(w, "LIST OPTIONS:");
     let _ = writeln!(
         w,
         "LIST [NAME] defaults to the enclosing set, or all sets outside a worktree."
@@ -237,6 +238,7 @@ fn write_worktree_help(w: &mut dyn std::io::Write) {
         w,
         "  --metadata-only          List membership paths without Git-state probes"
     );
+    let _ = writeln!(w);
     let _ = writeln!(w, "REMOVE OPTIONS:");
     let _ = writeln!(
         w,

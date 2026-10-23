@@ -13,7 +13,8 @@ mod status;
 use anyhow::Result;
 use clap::Parser;
 use colored::*;
-use meta_plugin_protocol::CommandResult;
+use meta_plugin_protocol::{CommandResult, PluginRequestOptions};
+use std::path::Path;
 
 use cli_types::WorktreeCommands;
 
@@ -29,15 +30,12 @@ struct WorktreeParser {
 ///
 /// `command` is the matched command string (e.g., "worktree create", "worktree", "git worktree").
 /// `args` contains the remaining arguments after the command prefix.
-/// `strict` is the global strict mode flag from CLI options.
+/// `cwd` is the protocol request directory, independent of the plugin process.
 pub fn execute_worktree_command(
     command: &str,
     args: &[String],
-    verbose: bool,
-    json: bool,
-    strict: bool,
-    recursive: bool,
-    dry_run: bool,
+    options: &PluginRequestOptions,
+    cwd: &Path,
 ) -> CommandResult {
     // Extract the subcommand name from the matched command prefix (if present).
     // When the plugin registers bare "worktree", the subcommand is in args[0] instead.
@@ -65,11 +63,13 @@ pub fn execute_worktree_command(
         clap_args.first().map(String::as_str),
         Some("create" | "list" | "status")
     );
-    if recursive && supports_recursive && !clap_args.iter().any(|a| a == "--recursive" || a == "-r")
+    if options.recursive
+        && supports_recursive
+        && !clap_args.iter().any(|a| a == "--recursive" || a == "-r")
     {
         clap_args.push("--recursive".to_string());
     }
-    if dry_run && is_create && !clap_args.iter().any(|a| a == "--dry-run") {
+    if options.dry_run && is_create && !clap_args.iter().any(|a| a == "--dry-run") {
         clap_args.push("--dry-run".to_string());
     }
 
@@ -84,7 +84,13 @@ pub fn execute_worktree_command(
     }
 
     match WorktreeParser::try_parse_from(&clap_args) {
-        Ok(parsed) => match handle_worktree_command(parsed.command, verbose, json, strict) {
+        Ok(parsed) => match handle_worktree_command(
+            parsed.command,
+            options.verbose,
+            options.json_output,
+            options.strict,
+            cwd,
+        ) {
             Ok(()) => CommandResult::Message(String::new()),
             Err(e) => CommandResult::Error(format!("{e}")),
         },
@@ -112,6 +118,7 @@ fn handle_worktree_command(
     verbose: bool,
     json: bool,
     global_strict: bool,
+    cwd: &Path,
 ) -> Result<()> {
     match command {
         WorktreeCommands::Create(args) => create::handle_create(args, verbose, json, global_strict),
@@ -119,7 +126,7 @@ fn handle_worktree_command(
         WorktreeCommands::Remove(args) | WorktreeCommands::Destroy(args) => {
             remove::handle_remove(args, verbose, json, global_strict)
         }
-        WorktreeCommands::List(args) => list::handle_list(args, verbose, json),
+        WorktreeCommands::List(args) => list::handle_list(args, verbose, json, cwd),
         WorktreeCommands::Status(args) => status::handle_status(args, verbose, json),
         WorktreeCommands::Diff(args) => diff::handle_diff(args, verbose, json),
         WorktreeCommands::Exec(args) => exec::handle_exec(args, verbose, json),

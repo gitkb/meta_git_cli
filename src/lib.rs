@@ -47,15 +47,7 @@ pub fn execute_command(
     // Worktree commands (meta worktree * and meta git worktree *)
     // Checked before --help intercept so worktree subcommands can handle their own --help via clap
     if command.starts_with("worktree") || command.starts_with("git worktree") {
-        return commands::worktree::execute_worktree_command(
-            command,
-            args,
-            options.verbose,
-            options.json_output,
-            options.strict,
-            options.recursive,
-            options.dry_run,
-        );
+        return commands::worktree::execute_worktree_command(command, args, options, cwd);
     }
 
     if command.starts_with("git snapshot") && help_requested {

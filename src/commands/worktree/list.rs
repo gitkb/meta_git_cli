@@ -87,23 +87,34 @@ fn repo_entries(path: &std::path::Path, args: &ListArgs, selected: bool) -> Resu
 }
 
 /// A selected set fails closed. All-set listing retains healthy sets and warnings.
-pub(crate) fn handle_list(args: ListArgs, _verbose: bool, json: bool) -> Result<()> {
-    let location = detect_worktree_location(&std::env::current_dir()?);
+pub(crate) fn handle_list(
+    args: ListArgs,
+    _verbose: bool,
+    json: bool,
+    cwd: &std::path::Path,
+) -> Result<()> {
+    let cwd = cwd.canonicalize()?;
+    let location = detect_worktree_location(&cwd);
+    let worktree_root = match (&location, std::env::var_os("META_WORKTREES")) {
+        (Some((_, root)), None) => root
+            .parent()
+            .expect("worktree location has a parent")
+            .to_path_buf(),
+        _ => {
+            let meta_dir = meta_cli::config::find_meta_config(&cwd, None)
+                .and_then(|(path, _)| path.parent().map(std::path::Path::to_path_buf));
+            let root = resolve_worktree_root(Some(meta_dir.as_deref().unwrap_or(&cwd)))?;
+            if root.is_absolute() {
+                root
+            } else {
+                cwd.join(root)
+            }
+        }
+    };
     let selected = match args.name.as_ref() {
         Some(name) => {
             validate_worktree_name(name)?;
-            let path = if std::env::var_os("META_WORKTREES").is_none() {
-                if let Some((_, current)) = &location {
-                    current
-                        .parent()
-                        .expect("worktree location has a parent")
-                        .join(name)
-                } else {
-                    resolve_existing_worktree(name)?.wt_dir
-                }
-            } else {
-                resolve_existing_worktree(name)?.wt_dir
-            };
+            let path = worktree_root.join(name);
             anyhow::ensure!(
                 path.is_dir(),
                 "Worktree '{name}' not found at {}",
@@ -120,8 +131,7 @@ pub(crate) fn handle_list(args: ListArgs, _verbose: bool, json: bool) -> Result<
     let sets = if let Some(selected) = selected {
         vec![selected]
     } else {
-        let meta_dir = find_meta_dir();
-        let root = resolve_worktree_root(meta_dir.as_deref())?;
+        let root = worktree_root;
         let mut sets = Vec::new();
         if root.exists() {
             for entry in std::fs::read_dir(root)? {

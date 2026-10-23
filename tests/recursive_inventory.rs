@@ -240,6 +240,13 @@ fn membership_only_protocol_runs_without_git_and_rejects_partial_membership() {
         &["worktree", "add", "-qb", "topic", set.to_str().unwrap()],
     );
     fs::write(set.join("untracked"), "dirty, deliberately unobserved").unwrap();
+    let nested = set.join("nested/child");
+    fs::create_dir_all(nested.parent().unwrap()).unwrap();
+    git(
+        &source,
+        &["worktree", "add", "-qb", "nested", nested.to_str().unwrap()],
+    );
+
     let bin = root.join("bin");
     fs::create_dir(&bin).unwrap();
     let fake_git = bin.join("git");
@@ -265,7 +272,14 @@ fn membership_only_protocol_runs_without_git_and_rejects_partial_membership() {
         let value: Value = serde_json::from_slice(&out.stdout).unwrap();
         let value = &value["worktrees"][0];
         assert_eq!(value["name"], "example");
-        assert_eq!(value["repos"].as_array().unwrap().len(), 1);
+        assert_eq!(value["repos"].as_array().unwrap().len(), 2);
+        assert_eq!(value["repos"][1]["alias"], "nested/child");
+        assert_eq!(value["repos"][1]["path"], nested.to_str().unwrap());
+        for member in value["repos"].as_array().unwrap() {
+            assert_eq!(member["source_path"], source.to_str().unwrap());
+            assert!(member.get("branch").is_none());
+            assert!(member.get("dirty").is_none());
+        }
         assert_eq!(value["repos"][0]["alias"], ".");
         assert_eq!(value["repos"][0]["path"], set.to_str().unwrap());
         assert!(value["repos"][0].get("branch").is_none());
@@ -346,7 +360,7 @@ fn list_infers_enclosing_set_and_metadata_only_avoids_git() {
     let invoke = |cwd: &Path, args: Vec<&str>, recursive: bool| {
         let mut child = Command::new(env!("CARGO_BIN_EXE_meta-git"))
             .arg("--meta-plugin-exec")
-            .current_dir(cwd)
+            .current_dir(&source)
             .env(
                 "PATH",
                 if args.contains(&"--metadata-only") {

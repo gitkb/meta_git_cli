@@ -99,10 +99,15 @@ fn is_remote_command(argv: &[String]) -> bool {
         .is_some_and(|subcommand| remote_commands.contains(&subcommand.as_str()))
 }
 
+/// A `--help`/`-h` before `--`; after it, they are arguments for the command.
 fn has_help_token(command: &str, args: &[String]) -> bool {
     command
         .split_whitespace()
-        .chain(args.iter().map(String::as_str))
+        .chain(
+            args.iter()
+                .map(String::as_str)
+                .take_while(|arg| *arg != "--"),
+        )
         .any(|arg| arg == "--help" || arg == "-h")
 }
 

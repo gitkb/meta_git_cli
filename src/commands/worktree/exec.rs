@@ -9,8 +9,8 @@ use meta_git_lib::worktree::helpers::*;
 use super::cli_types::{CreateArgs, DestroyArgs, ExecArgs};
 use crate::git_env;
 
-/// Runs in each of `repos`, naming them by their path from `wt_dir`.
-/// `--include`/`--exclude` values name repos by `.meta` name or that path.
+/// Runs in each of `repos` that `--include`/`--exclude` select (a repo's
+/// `.meta` name or its path from `wt_dir`), naming them by that path.
 fn build_loop_config(
     wt_dir: &Path,
     repos: &[WorktreeRepoInfo],
@@ -21,22 +21,22 @@ fn build_loop_config(
     json: bool,
 ) -> Result<loop_lib::LoopConfig> {
     let directories: Vec<String> = repos.iter().map(|r| r.path.display().to_string()).collect();
-    let names = if include_filters.is_empty() && exclude_filters.is_empty() {
-        vec![]
+    let directories = if include_filters.is_empty() && exclude_filters.is_empty() {
+        directories
     } else {
-        find_meta_dir()
-            .map(|meta_dir| repo_filter::repo_names(&meta_dir))
-            .unwrap_or_default()
-    };
-    let resolve = |flag, values: Vec<String>| -> Result<Option<Vec<String>>> {
-        if values.is_empty() {
-            return Ok(None);
-        }
-        repo_filter::resolve(flag, &values, &directories, wt_dir, &names).map(Some)
+        let tree = find_meta_dir()
+            .and_then(|meta_dir| meta_core::config::walk_meta_tree(&meta_dir, None).ok())
+            .unwrap_or_default();
+        let names = repo_filter::repo_names(&[], &tree);
+        repo_filter::select(
+            &include_filters,
+            &exclude_filters,
+            &directories,
+            wt_dir,
+            &names,
+        )?
     };
     Ok(loop_lib::LoopConfig {
-        include_filters: resolve("--include", include_filters)?,
-        exclude_filters: resolve("--exclude", exclude_filters)?,
         directories,
         ignore: vec![],
         verbose,

@@ -70,6 +70,11 @@ pub fn execute_command(
         "git snapshot create" => snapshot::execute_snapshot_create(args, projects, cwd),
         "git snapshot list" => snapshot::execute_snapshot_list(cwd),
         "git snapshot show" => snapshot::execute_snapshot_show(args, cwd),
+        "git snapshot restore" if options.include_filters.is_some() || options.exclude_filters.is_some() => {
+            Err(anyhow::anyhow!(
+                "meta git snapshot restore restores every repo in the snapshot; it does not take --include/--exclude"
+            ))
+        }
         "git snapshot restore" => {
             snapshot::execute_snapshot_restore(args, projects, options.dry_run, cwd)
         }

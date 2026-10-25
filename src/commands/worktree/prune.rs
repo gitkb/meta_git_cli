@@ -1,6 +1,7 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::Utc;
 use colored::*;
+use meta_core::display::escape;
 use std::path::Path;
 
 use meta_git_lib::worktree::helpers::{find_meta_dir, lookup_nested_project};
@@ -218,7 +219,12 @@ pub(crate) fn handle_prune(
             } else {
                 println!("Would prune {} worktree(s):", would_remove.len());
                 for entry in &would_remove {
-                    println!("  {} ({}) — {}", entry.name, entry.reason, entry.path);
+                    println!(
+                        "  {} ({}) — {}",
+                        escape(&entry.name),
+                        escape(&entry.reason),
+                        escape(&entry.path)
+                    );
                 }
             }
             print_kept(&kept);
@@ -272,7 +278,8 @@ pub(crate) fn handle_prune(
             Some((e.path.clone(), entry.created_at.clone()))
         })
         .collect();
-    super::warn_store_error(store_remove_batch(&records), strict)?;
+    store_remove_batch(&records)
+        .context("Pruned worktrees, but could not update the worktree store")?;
 
     // Fire post-prune hook
     let meta_dir = find_meta_dir();
@@ -290,13 +297,18 @@ pub(crate) fn handle_prune(
     } else {
         println!("{} Pruned {} worktree(s):", "✓".green(), removed.len());
         for entry in &removed {
-            println!("  {} ({}) — {}", entry.name, entry.reason, entry.path);
+            println!(
+                "  {} ({}) — {}",
+                escape(&entry.name),
+                escape(&entry.reason),
+                escape(&entry.path)
+            );
         }
         print_kept(&kept);
     }
 
     if !failed.is_empty() {
-        anyhow::bail!("Failed to prune: {}", failed.join(", "));
+        anyhow::bail!("Failed to prune: {}", escape(&failed.join(", ")));
     }
     warn_kept(&kept, strict)
 }
@@ -307,7 +319,12 @@ fn print_kept(kept: &[PruneEntry]) {
     }
     println!("Kept {} worktree(s):", kept.len());
     for entry in kept {
-        println!("  {} ({}) — {}", entry.name, entry.reason, entry.path);
+        println!(
+            "  {} ({}) — {}",
+            escape(&entry.name),
+            escape(&entry.reason),
+            escape(&entry.path)
+        );
     }
 }
 

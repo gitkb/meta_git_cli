@@ -1,5 +1,6 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use colored::*;
+use meta_core::display::{escape, escape_path};
 
 use meta_cli::worktree::discover_worktree_repos;
 use meta_git_lib::worktree::git_ops::git_worktree_add;
@@ -9,7 +10,7 @@ use meta_git_lib::worktree::types::*;
 
 use super::cli_types::AddArgs;
 
-pub(crate) fn handle_add(args: AddArgs, verbose: bool, json: bool, strict: bool) -> Result<()> {
+pub(crate) fn handle_add(args: AddArgs, verbose: bool, json: bool) -> Result<()> {
     let name = &args.name;
     validate_worktree_name(name)?;
 
@@ -25,10 +26,10 @@ pub(crate) fn handle_add(args: AddArgs, verbose: bool, json: bool, strict: bool)
 
     let meta_dir = require_meta_dir()?;
     let worktree_root = resolve_worktree_root(Some(&meta_dir))?;
-    let wt_dir = worktree_root.join(name);
+    let wt_dir = worktree_set_dir(&worktree_root, name)?;
 
     if !wt_dir.exists() {
-        anyhow::bail!("Worktree '{}' not found at {}", name, wt_dir.display());
+        anyhow::bail!("Worktree '{}' not found at {}", name, escape_path(&wt_dir));
     }
 
     // Check existing repos in the worktree
@@ -47,6 +48,14 @@ pub(crate) fn handle_add(args: AddArgs, verbose: bool, json: bool, strict: bool)
         // Preserve the full alias as the destination path so that relative
         // references (e.g., Cargo.toml workspace members) remain valid.
         let dest = wt_dir.join(&spec.alias);
+        // A checkout already in the worktree (such as the root repo's) may
+        // hold a symlink where this one goes; git must not follow it out
+        meta_core::config::resolve_inside(&wt_dir, &spec.alias).map_err(|why| {
+            anyhow::anyhow!(
+                "Refusing to add the worktree for '{}': {why}",
+                escape(&spec.alias)
+            )
+        })?;
 
         // Ensure parent directories exist for nested paths (e.g., "vendor/")
         if let Some(parent) = dest.parent() {
@@ -58,9 +67,9 @@ pub(crate) fn handle_add(args: AddArgs, verbose: bool, json: bool, strict: bool)
         if verbose {
             eprintln!(
                 "Adding worktree for '{}' at {} (branch: {})",
-                spec.alias,
-                dest.display(),
-                branch
+                escape(&spec.alias),
+                escape_path(&dest),
+                escape(&branch)
             );
         }
 
@@ -75,7 +84,9 @@ pub(crate) fn handle_add(args: AddArgs, verbose: bool, json: bool, strict: bool)
 
     // Update centralized store
     let new_repos: Vec<StoreRepoEntry> = added.iter().map(StoreRepoEntry::from).collect();
-    super::warn_store_error(store_extend_repos(&wt_dir, new_repos), strict)?;
+    store_extend_repos(&wt_dir, new_repos).with_context(|| {
+        format!("Added repos to worktree '{name}', but could not update the worktree store")
+    })?;
 
     if json {
         let output = AddOutput {
@@ -89,9 +100,9 @@ pub(crate) fn handle_add(args: AddArgs, verbose: bool, json: bool, strict: bool)
             println!(
                 "{} Added '{}' to worktree '{}' (branch: {}{})",
                 "✓".green(),
-                r.alias,
+                escape(&r.alias),
                 name,
-                r.branch,
+                escape(&r.branch),
                 branch_note
             );
         }

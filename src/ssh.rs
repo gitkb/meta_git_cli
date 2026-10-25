@@ -1,4 +1,5 @@
 use console::style;
+use meta_core::display::escape;
 use std::collections::BTreeSet;
 use std::path::Path;
 
@@ -90,9 +91,9 @@ pub(crate) fn warn_remote_mismatches(cwd: &Path) {
     );
 
     for m in &mismatches {
-        eprintln!("  {}", style(&m.name).bold());
-        eprintln!("    actual:   {}", style(&m.actual).red());
-        eprintln!("    expected: {}", style(&m.expected).green());
+        eprintln!("  {}", style(escape(&m.name)).bold());
+        eprintln!("    actual:   {}", style(escape(&m.actual)).red());
+        eprintln!("    expected: {}", style(escape(&m.expected)).green());
     }
 
     eprintln!();
@@ -100,7 +101,8 @@ pub(crate) fn warn_remote_mismatches(cwd: &Path) {
     for m in &mismatches {
         eprintln!(
             "    git -C '{}' remote set-url origin '{}'",
-            m.path, m.expected
+            escape(&m.path),
+            escape(&m.expected)
         );
     }
 }

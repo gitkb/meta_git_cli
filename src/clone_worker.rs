@@ -29,6 +29,8 @@ pub(crate) fn clone_with_queue(
     let work_signal = Arc::new((Mutex::new(false), Condvar::new()));
 
     let ssh_cmd = Arc::new(ssh_cmd.map(|s| s.to_string()));
+    // Nested .meta configs that failed to parse or validate
+    let nested_errors = Arc::new(Mutex::new(Vec::new()));
 
     // Spawn worker threads
     let handles: Vec<_> = (0..parallelism)
@@ -39,6 +41,7 @@ pub(crate) fn clone_with_queue(
             let mp = mp.clone();
             let style = spinner_style.clone();
             let ssh_cmd = Arc::clone(&ssh_cmd);
+            let nested_errors = Arc::clone(&nested_errors);
 
             std::thread::spawn(move || {
                 loop {
@@ -61,7 +64,13 @@ pub(crate) fn clone_with_queue(
                             pb.enable_steady_tick(Duration::from_millis(100));
 
                             // Clone the repo (this may add new tasks to queue)
-                            clone_single_repo(&task, &queue, &pb, ssh_cmd.as_deref());
+                            clone_single_repo(
+                                &task,
+                                &queue,
+                                &pb,
+                                ssh_cmd.as_deref(),
+                                &nested_errors,
+                            );
 
                             // Mark worker as inactive
                             active.fetch_sub(1, Ordering::SeqCst);
@@ -98,6 +107,15 @@ pub(crate) fn clone_with_queue(
         handle.join().expect("Worker thread panicked");
     }
 
+    // A nested config that is refused leaves its repos uncloned, so the
+    // command must not report success
+    let errors = nested_errors.lock().unwrap_or_else(|e| e.into_inner());
+    if !errors.is_empty() {
+        anyhow::bail!(
+            "Could not read nested .meta configs:\n{}",
+            errors.join("\n")
+        );
+    }
     Ok(())
 }
 
@@ -112,11 +130,12 @@ pub(crate) fn report_failures(queue: &CloneQueue) -> Option<String> {
         eprintln!(
             "{} {} ({})",
             style("Failed to clone").red().bold(),
-            failure.name,
-            failure.url
+            meta_core::display::escape(&failure.name),
+            meta_core::display::escape(&failure.url)
         );
+        // git's error names paths from the filesystem
         for line in failure.error.lines() {
-            eprintln!("    {line}");
+            eprintln!("    {}", meta_core::display::escape(line));
         }
     }
     let (finished, _) = queue.get_counts();
@@ -137,7 +156,14 @@ fn clone_single_repo(
     queue: &Arc<CloneQueue>,
     pb: &ProgressBar,
     ssh_cmd: Option<&str>,
+    nested_errors: &Mutex<Vec<String>>,
 ) {
+    let record = |e: anyhow::Error| {
+        nested_errors
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(format!("  {}: {e:#}", task.name));
+    };
     // Skip if target exists
     if task.target_path.exists()
         && task
@@ -153,6 +179,7 @@ fn clone_single_repo(
         // Still mark as completed and check for nested .meta
         if let Err(e) = queue.mark_completed(task) {
             debug!("Failed to check nested .meta for {}: {}", task.name, e);
+            record(e);
         }
         return;
     }
@@ -179,7 +206,8 @@ fn clone_single_repo(
             let pb_clone = pb.clone();
             let task_name = task.name.clone();
             let tail = StderrTail::spawn(child.stderr.take(), move |line| {
-                pb_clone.set_message(format!("{task_name}: {line}"))
+                // git's progress names paths from the filesystem
+                pb_clone.set_message(format!("{task_name}: {}", meta_core::display::escape(line)))
             });
 
             let status = child.wait();
@@ -211,6 +239,7 @@ fn clone_single_repo(
                                 style(format!("Cloned {} (meta parse error: {})", task.name, e))
                                     .yellow()
                             ));
+                            record(e);
                         }
                     }
                 }

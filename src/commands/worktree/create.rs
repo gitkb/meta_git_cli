@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
 use colored::*;
+use meta_core::display::{escape, escape_path};
 use std::collections::{HashMap, HashSet};
 
 use meta_cli::dependency_graph::{DependencyGraph, ProjectDependencies};
@@ -66,6 +67,25 @@ pub(crate) fn handle_create(
     if repo_specs.is_empty() && !use_all {
         anyhow::bail!("Specify repos with --repo <alias> or use --all");
     }
+    // A repeated --repo is one worktree; two branches for it cannot both be
+    // checked out there, and keeping one would drop the other unnoticed
+    for (i, spec) in repo_specs.iter().enumerate() {
+        let other = repo_specs
+            .iter()
+            .skip(i + 1)
+            .find(|o| o.alias == spec.alias && o.branch != spec.branch);
+        if let Some(other) = other {
+            let branch = |s: &meta_git_lib::worktree::RepoSpec| {
+                escape(s.branch.as_deref().unwrap_or("(default)")).into_owned()
+            };
+            anyhow::bail!(
+                "Repo '{}' is given twice, on branches '{}' and '{}'",
+                escape(&spec.alias),
+                branch(spec),
+                branch(other)
+            );
+        }
+    }
 
     let nearest_meta_dir = require_meta_dir()?;
     let meta_dir = if recursive {
@@ -76,12 +96,12 @@ pub(crate) fn handle_create(
     let worktree_root = resolve_worktree_root(Some(&meta_dir))?;
 
     // Check if worktree already exists
-    let wt_dir = worktree_root.join(name);
+    let wt_dir = worktree_set_dir(&worktree_root, name)?;
     if wt_dir.exists() {
         anyhow::bail!(
             "Worktree '{}' already exists at {}. Use 'meta worktree remove {}' first.",
             name,
-            wt_dir.display(),
+            escape_path(&wt_dir),
             name
         );
     }
@@ -141,8 +161,11 @@ pub(crate) fn handle_create(
 
     // For nested aliases like "gitkb/core", ensure intermediate meta: true
     // parents ("gitkb") get worktrees too — the thin spine from root to target.
-    let repos_to_create =
+    let mut repos_to_create =
         ensure_intermediate_parents(&meta_dir, repos_to_create, name, branch_flag)?;
+    // One worktree per alias: a repeated --repo would try the same add twice
+    let mut seen = HashSet::new();
+    repos_to_create.retain(|(alias, _, _)| seen.insert(alias.clone()));
 
     if dry_run {
         let plan = CreateDryRunPlan {
@@ -160,7 +183,6 @@ pub(crate) fn handle_create(
     }
 
     // Resolve/apply --from-pr: get PR head branch, override branch for the matching repo, and fetch
-    let mut repos_to_create = repos_to_create;
     let from_pr_info = from_pr_spec.map(resolve_from_pr).transpose()?;
     if let Some((ref pr_repo_spec, _pr_num, ref pr_branch)) = from_pr_info {
         let (alias, source, branch) = repos_to_create
@@ -184,9 +206,12 @@ pub(crate) fn handle_create(
     }
     if let Err(e) = std::fs::create_dir(&wt_dir) {
         if e.kind() == std::io::ErrorKind::AlreadyExists {
-            anyhow::bail!("Worktree '{name}' already exists at {}", wt_dir.display());
+            anyhow::bail!(
+                "Worktree '{name}' already exists at {}",
+                escape_path(&wt_dir)
+            );
         }
-        return Err(e).with_context(|| format!("Cannot create {}", wt_dir.display()));
+        return Err(e).with_context(|| format!("Cannot create {}", escape_path(&wt_dir)));
     }
 
     // Anything that fails from here rolls back what this call created.
@@ -203,8 +228,8 @@ pub(crate) fn handle_create(
                 if verbose {
                     eprintln!(
                         "Creating meta repo worktree at {} (branch: {})",
-                        wt_dir.display(),
-                        branch
+                        escape_path(&wt_dir),
+                        escape(branch)
                     );
                 }
                 let created_branch = journal_new_branch(source, branch, &mut new_branches, || {
@@ -235,6 +260,14 @@ pub(crate) fn handle_create(
             // "vendor/tree-sitter-markdown" -> "vendor/tree-sitter-markdown"
             // Simple aliases are unchanged: "core" -> "core"
             let dest = wt_dir.join(alias);
+            // A checkout already in the worktree (such as the root repo's) may
+            // hold a symlink where this one goes; git must not follow it out
+            meta_core::config::resolve_inside(&wt_dir, alias).map_err(|why| {
+                anyhow::anyhow!(
+                    "Refusing to add the worktree for '{}': {why}",
+                    escape(alias)
+                )
+            })?;
 
             // Ensure parent directories exist for nested paths (e.g., "vendor/")
             if let Some(parent) = dest.parent() {
@@ -246,9 +279,9 @@ pub(crate) fn handle_create(
             if verbose {
                 eprintln!(
                     "Creating worktree for '{}' at {} (branch: {})",
-                    alias,
-                    dest.display(),
-                    branch
+                    escape(alias),
+                    escape_path(&dest),
+                    escape(branch)
                 );
             }
 
@@ -322,11 +355,16 @@ pub(crate) fn handle_create(
             "{} Created worktree '{}' at {}",
             "✓".green(),
             name.bold(),
-            wt_dir.display()
+            escape_path(&wt_dir)
         );
         for r in &created_repos {
             let branch_note = if r.created_branch { " (new)" } else { "" };
-            println!("  {} -> {}{}", r.alias, r.branch, branch_note);
+            println!(
+                "  {} -> {}{}",
+                escape(&r.alias),
+                escape(&r.branch),
+                branch_note
+            );
         }
         if ephemeral {
             println!("  {}", "[ephemeral]".dimmed());
@@ -374,7 +412,7 @@ fn journal_new_branch(
             .context(format!(
                 "branch '{branch}' now exists in {} and was kept: meta can't tell whether this \
              create made it",
-                repo.display()
+                escape_path(repo)
             ))),
         Err(e) => Err(e),
     }
@@ -399,11 +437,11 @@ fn roll_back(
             "{error:#}\nThe partly created worktree at {} was left in place ({undo:#}); \
              delete it yourself and run 'git worktree prune' in its repositories. \
              Branches this create made: {}",
-            wt_dir.display(),
+            escape_path(wt_dir),
             if branches.is_empty() {
                 "none".to_string()
             } else {
-                branches.join(", ")
+                escape(&branches.join(", ")).into_owned()
             }
         );
     }
@@ -437,7 +475,7 @@ fn print_create_dry_run(plan: &CreateDryRunPlan<'_>) {
     println!(
         "[DRY RUN] Would create worktree set '{}' at {}",
         plan.name,
-        plan.wt_dir.display()
+        escape_path(plan.wt_dir)
     );
     println!();
 
@@ -484,11 +522,11 @@ fn print_create_dry_run(plan: &CreateDryRunPlan<'_>) {
             cmd.push(' ');
             cmd.push_str(&shell_quote(from_ref));
         }
-        println!("  {alias}:");
-        println!("    source: {}", source.display());
-        println!("    dest:   {}", dest.display());
-        println!("    branch: {branch}");
-        println!("    bash:   {cmd}");
+        println!("  {}:", escape(alias));
+        println!("    source: {}", escape_path(source));
+        println!("    dest:   {}", escape_path(&dest));
+        println!("    branch: {}", escape(branch));
+        println!("    bash:   {}", escape(&cmd));
     }
 
     println!();
@@ -741,9 +779,26 @@ fn ensure_intermediate_parents(
 
             // Resolve the parent's source path via config lookup (respects custom
             // `path` settings) with a fallback to direct path joining.
+            // A fallback directory must lie inside the workspace and not be a
+            // symlink: it becomes a source repo for git
             let parent_source = match lookup_nested_project(meta_dir, &parent_alias) {
                 Ok((source, _project)) => source,
-                Err(_) => meta_dir.join(&parent_alias),
+                Err(_) => {
+                    let candidate = meta_dir.join(&parent_alias);
+                    let is_link = candidate
+                        .symlink_metadata()
+                        .is_ok_and(|meta| meta.file_type().is_symlink());
+                    if is_link
+                        || meta_core::config::resolve_inside(meta_dir, &parent_alias).is_err()
+                    {
+                        log::warn!(
+                            "Intermediate parent '{}' is not a plain directory inside the workspace, skipping",
+                            escape(&parent_alias)
+                        );
+                        continue;
+                    }
+                    candidate
+                }
             };
             if !parent_source.exists() {
                 log::warn!(

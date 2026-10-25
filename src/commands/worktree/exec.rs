@@ -1,5 +1,6 @@
 use anyhow::Result;
 use colored::*;
+use meta_core::display::escape_lines;
 use std::path::Path;
 
 use meta_cli::repo_filter;
@@ -45,16 +46,18 @@ fn build_loop_config(
     })
 }
 
-/// RAII guard that removes an ephemeral worktree on drop.
-/// Ensures cleanup even if the exec command panics.
+/// RAII guard that removes an ephemeral worktree.
+/// `finish` removes it and reports failure; drop is the fallback that still
+/// cleans up after an early return or a panic.
 struct EphemeralGuard {
     name: String,
     verbose: bool,
     json: bool,
+    finished: bool,
 }
 
-impl Drop for EphemeralGuard {
-    fn drop(&mut self) {
+impl EphemeralGuard {
+    fn remove(&self) -> Result<()> {
         if self.verbose {
             eprintln!("Removing ephemeral worktree '{}'...", self.name);
         }
@@ -62,12 +65,26 @@ impl Drop for EphemeralGuard {
             name: self.name.clone(),
             force: true,
         };
-        // Ephemeral cleanup uses strict=false to ensure best-effort cleanup
-        if let Err(e) = super::remove::handle_remove(destroy_args, self.verbose, self.json, false) {
+        super::remove::handle_remove(destroy_args, self.verbose, self.json)
+    }
+
+    fn finish(mut self) -> Result<()> {
+        self.finished = true;
+        self.remove()
+    }
+}
+
+impl Drop for EphemeralGuard {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        if let Err(e) = self.remove() {
             eprintln!(
-                "{} Failed to remove ephemeral worktree '{}': {e}",
+                "{} Failed to remove ephemeral worktree '{}': {}",
                 "warning:".yellow().bold(),
-                self.name
+                self.name,
+                escape_lines(&format!("{e:#}"))
             );
             eprintln!(
                 "  Run 'meta worktree remove {} --force' or 'meta worktree prune' to clean up.",
@@ -142,12 +159,13 @@ fn handle_ephemeral_exec(args: ExecArgs, verbose: bool, json: bool) -> Result<()
         name: name.clone(),
         verbose,
         json,
+        finished: false,
     };
 
     // Resolve worktree path for exec
     let meta_dir = find_meta_dir();
     let worktree_root = resolve_worktree_root(meta_dir.as_deref())?;
-    let wt_dir = worktree_root.join(&name);
+    let wt_dir = worktree_set_dir(&worktree_root, &name)?;
 
     // Run the command
     let repos = discover_worktree_repos(&wt_dir)?;
@@ -164,10 +182,19 @@ fn handle_ephemeral_exec(args: ExecArgs, verbose: bool, json: bool) -> Result<()
 
     let exec_result = config.and_then(|config| loop_lib::run(&config, &cmd_parts));
 
-    // Explicitly drop guard to trigger cleanup before propagating result
-    drop(guard);
-
-    // Propagate exec result
-    exec_result?;
-    Ok(())
+    // Clean up before propagating the result; a failed cleanup (such as an
+    // unwritable store) fails the command too
+    let cleanup = guard.finish();
+    match (exec_result, cleanup) {
+        (Err(e), Err(cleanup_error)) => {
+            eprintln!(
+                "{} {}",
+                "warning:".yellow().bold(),
+                escape_lines(&format!("{cleanup_error:#}"))
+            );
+            Err(e)
+        }
+        (Err(e), Ok(())) => Err(e),
+        (Ok(()), cleanup) => cleanup,
+    }
 }

@@ -1,5 +1,6 @@
 use console::style;
 use meta_core::config;
+use meta_core::display::escape_path;
 use meta_plugin_protocol::{CommandResult, PlannedCommand, PluginRequestOptions};
 use std::process::Command;
 
@@ -43,7 +44,7 @@ pub(crate) fn execute_git_commit(
         let Some((meta_path, _format)) = config::find_meta_config_in(cwd) else {
             return Ok(CommandResult::Message(format!(
                 "No .meta config found in {}",
-                cwd.display()
+                escape_path(cwd)
             )));
         };
         let (projects, _) = config::parse_meta_config(&meta_path)?;
@@ -172,12 +173,16 @@ fn execute_editor_commit(repos: &[(String, String, Vec<String>)]) -> anyhow::Res
         template.push_str("# Enter commit message above this line\n\n");
     }
 
-    // Write to temp file
-    let temp_dir = std::env::temp_dir();
-    let temp_file = temp_dir.join("META_COMMIT_EDITMSG");
-    let mut file = std::fs::File::create(&temp_file)?;
+    // Write to a new temp file (created exclusively, mode 0600, removed on
+    // drop) in meta's private data dir, never in a shared directory like /tmp
+    let mut file = tempfile::Builder::new()
+        .prefix("META_COMMIT_EDITMSG-")
+        .tempfile_in(meta_core::data_dir::data_subdir("tmp")?)?;
     file.write_all(template.as_bytes())?;
-    drop(file);
+    file.flush()?;
+    // Close it (some editors on Windows cannot replace an open file); the
+    // path is still removed on drop
+    let temp_file = file.into_temp_path();
 
     // Get editor from environment
     let editor = std::env::var("EDITOR")
@@ -195,8 +200,7 @@ fn execute_editor_commit(repos: &[(String, String, Vec<String>)]) -> anyhow::Res
     let content = std::fs::read_to_string(&temp_file)?;
     let commits = parse_multi_commit_file(&content);
 
-    // Clean up temp file
-    let _ = std::fs::remove_file(&temp_file);
+    drop(temp_file);
 
     if commits.is_empty() {
         println!("No commits to make (all messages were empty or deleted).");

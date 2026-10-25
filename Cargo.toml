@@ -15,6 +15,7 @@ name = "meta_git_cli"
 path = "src/lib.rs"
 
 [dependencies]
+tempfile = "3.3"
 meta_plugin_protocol = { path = "../meta_plugin_protocol" }
 meta_core = { path = "../meta_core" }
 meta_git_lib = { path = "../meta_git_lib" }
@@ -33,6 +34,3 @@ console = "0.15"
 log = "0.4"
 colored = "2"
 indexmap = "2"
-
-[dev-dependencies]
-tempfile = "3.3"

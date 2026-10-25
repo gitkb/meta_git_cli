@@ -1,6 +1,7 @@
 use anyhow::Result;
 use chrono::Utc;
 use colored::*;
+use meta_core::display::{escape, escape_path};
 use rayon::prelude::*;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -114,11 +115,11 @@ pub(crate) fn handle_list(
     let selected = match args.name.as_ref() {
         Some(name) => {
             validate_worktree_name(name)?;
-            let path = worktree_root.join(name);
+            let path = worktree_set_dir(&worktree_root, name)?;
             anyhow::ensure!(
                 path.is_dir(),
                 "Worktree '{name}' not found at {}",
-                path.display()
+                escape_path(&path)
             );
             Some((name.clone(), path))
         }
@@ -152,7 +153,15 @@ pub(crate) fn handle_list(
         }
         sets
     };
-    let store_data = store_list().unwrap_or_default();
+    // Listing still works without the store (no TTL or ephemeral marks), but
+    // say why it is missing
+    let store_data = store_list().unwrap_or_else(|e| {
+        eprintln!(
+            "warning: not using the worktree store: {}",
+            meta_core::display::escape_lines(&format!("{e:#}"))
+        );
+        Default::default()
+    });
     let now = Utc::now().timestamp();
     let results: Vec<Result<Option<ListEntry>>> = sets
         .par_iter()
@@ -228,7 +237,7 @@ pub(crate) fn handle_list(
         );
     }
     for entry in worktrees {
-        let mut header = entry.name.bold().to_string();
+        let mut header = escape(&entry.name).bold().to_string();
         if entry.ephemeral == Some(true) {
             header.push_str(&format!(" {}", "[ephemeral]".dimmed()));
         }
@@ -247,21 +256,32 @@ pub(crate) fn handle_list(
         println!("{header}");
         for repo in entry.repos {
             match repo {
-                RepoEntry::Metadata(repo) => println!("  {}  {}", repo.alias, repo.path.display()),
+                RepoEntry::Metadata(repo) => {
+                    println!("  {}  {}", escape(&repo.alias), escape_path(&repo.path))
+                }
                 RepoEntry::Observed(repo) => {
                     let status = if repo.dirty {
                         "modified".yellow().to_string()
                     } else {
                         "clean".green().to_string()
                     };
-                    println!("  {:12} -> {:20} ({})", repo.alias, repo.branch, status);
+                    println!(
+                        "  {:12} -> {:20} ({})",
+                        escape(&repo.alias),
+                        escape(&repo.branch),
+                        status
+                    );
                 }
             }
         }
         println!();
     }
     for warning in warnings {
-        eprintln!("Warning: {}: {}", warning.name, warning.message);
+        eprintln!(
+            "Warning: {}: {}",
+            escape(&warning.name),
+            escape(&warning.message)
+        );
     }
     Ok(())
 }

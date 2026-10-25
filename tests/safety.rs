@@ -112,8 +112,9 @@ fn remove_refuses_directories_meta_did_not_create() {
     assert!(stderr(&out).contains("no record"), "{}", stderr(&out));
     assert!(ws.join(".worktrees/notawt/data").exists());
 
-    // worktrees_dir "." makes the primary clone `a` look like a worktree. Even
-    // with a forged store record, a primary checkout is never deleted.
+    // worktrees_dir "." would make the primary clone `a` look like a worktree.
+    // Such a config is refused, so even with a forged store record the
+    // primary checkout is never deleted.
     let config = json!({"worktrees_dir": ".", "projects": {"a": "unused"}});
     fs::write(ws.join(".meta"), config.to_string()).unwrap();
     let key = ws.join("a").canonicalize().unwrap();
@@ -125,7 +126,7 @@ fn remove_refuses_directories_meta_did_not_create() {
     let out = worktree(root, &ws, &["remove", "a", "--force"]);
     assert!(!out.status.success());
     assert!(
-        stderr(&out).contains("not a linked worktree"),
+        stderr(&out).contains("Invalid worktrees_dir"),
         "{}",
         stderr(&out)
     );
@@ -640,9 +641,11 @@ fn remove_drops_the_record_when_the_worktrees_dir_is_a_link() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
     let ws = workspace(root, &["a"]);
-    fs::create_dir(root.join("real")).unwrap();
-    std::os::unix::fs::symlink(root.join("real"), root.join("link")).unwrap();
-    let config = json!({"worktrees_dir": "../link", "projects": {"a": "unused"}});
+    // worktrees_dir must stay inside the workspace; a link there still
+    // resolves to another path than the one written
+    fs::create_dir(ws.join("real")).unwrap();
+    std::os::unix::fs::symlink(ws.join("real"), ws.join("link")).unwrap();
+    let config = json!({"worktrees_dir": "link", "projects": {"a": "unused"}});
     fs::write(ws.join(".meta"), config.to_string()).unwrap();
 
     let out = worktree(root, &ws, &["create", "t", "--repo", "a", "--no-deps"]);

@@ -81,7 +81,7 @@ pub fn execute_command(
 
     match result {
         Ok(cmd_result) => cmd_result,
-        Err(e) => CommandResult::Error(format!("{e}")),
+        Err(e) => CommandResult::Error(format!("{e:#}")),
     }
 }
 
@@ -193,7 +193,7 @@ fn execute_raw_git_command(
     // Get project directories
     let dirs = match get_project_directories_with_fallback(projects, cwd) {
         Ok(d) => d,
-        Err(e) => return CommandResult::Error(format!("Failed to get project directories: {e}")),
+        Err(e) => return CommandResult::Error(format!("Failed to get project directories: {e:#}")),
     };
 
     // The git argv: the command words (e.g. "git" or "git add") and the

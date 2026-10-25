@@ -92,7 +92,7 @@ pub fn execute_worktree_command(
             cwd,
         ) {
             Ok(()) => CommandResult::Message(String::new()),
-            Err(e) => CommandResult::Error(format!("{e}")),
+            Err(e) => CommandResult::Error(format!("{e:#}")),
         },
         Err(e) => {
             // Clap treats --help and --version as "errors" with special ErrorKind

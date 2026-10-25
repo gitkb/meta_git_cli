@@ -133,6 +133,7 @@ pub(crate) fn execute_snapshot_create(
         .iter()
         .find(|a| !a.starts_with('-'))
         .ok_or_else(|| anyhow::anyhow!("Usage: meta git snapshot create <name>"))?;
+    snapshot::validate_snapshot_name(name)?;
 
     // Get all repos (recursive by default)
     let dirs = get_all_repo_directories(projects, cwd)?;
@@ -289,7 +290,7 @@ pub(crate) fn execute_snapshot_show(args: &[String], cwd: &Path) -> anyhow::Resu
 
         println!(
             "  {} {}{}{}",
-            style(&state.sha[..8]).dim(),
+            style(snapshot::short_sha(&state.sha)).dim(),
             name,
             style(branch_info).cyan(),
             dirty_marker
@@ -329,6 +330,7 @@ pub(crate) fn execute_snapshot_restore(
     // Analyze what would change
     let mut repos_to_restore: Vec<(&str, &RepoState, bool)> = Vec::new();
     let mut missing_repos = Vec::new();
+    let mut moved_back = Vec::new();
 
     for (repo_name, state) in &snap.repos {
         let path = if repo_name == "." {
@@ -345,6 +347,18 @@ pub(crate) fn execute_snapshot_restore(
         // Check if current state is dirty
         let current_state = snapshot::capture_repo_state(&path)?;
         repos_to_restore.push((repo_name, state, current_state.dirty));
+        match snapshot::backups_needed(&path, state, name) {
+            Ok(backups) => moved_back.extend(backups.into_iter().map(|backup| {
+                format!(
+                    "{repo_name}: {} commit(s) on {} -> kept on {}",
+                    backup.commits, backup.from, backup.name
+                )
+            })),
+            // The restore itself refuses this repo; say so before confirming.
+            Err(e) => moved_back.push(format!(
+                "{repo_name}: cannot check for newer commits ({e:#})"
+            )),
+        }
     }
 
     let dirty_count = repos_to_restore.iter().filter(|(_, _, d)| *d).count();
@@ -371,6 +385,15 @@ pub(crate) fn execute_snapshot_restore(
             style(missing_repos.len()).red(),
             missing_repos.join(", ")
         );
+    }
+    if !moved_back.is_empty() {
+        println!(
+            "  - {} commit sets would end up on no branch; they are kept on backup branches:",
+            style(moved_back.len()).yellow()
+        );
+        for line in &moved_back {
+            println!("      {line}");
+        }
     }
     println!();
 
@@ -404,38 +427,33 @@ pub(crate) fn execute_snapshot_restore(
             cwd.join(repo_name)
         };
 
-        let result = snapshot::restore_repo_state(&path, state, force)?;
+        let result = snapshot::restore_repo_state(&path, state, name)?;
 
-        if result.success {
-            let stash_note = if result.stashed {
-                format!(" {}", style("(stashed changes)").yellow())
-            } else {
-                String::new()
-            };
-            println!(
-                "  {} {} {}{}",
-                style("✓").green(),
-                repo_name,
-                result.message,
-                stash_note
-            );
-            success_count += 1;
+        let stash_note = if result.stashed {
+            format!(
+                " {}",
+                style("(changes stashed: see git stash list)").yellow()
+            )
         } else {
-            println!("  {} {} {}", style("✗").red(), repo_name, result.message);
+            String::new()
+        };
+        let mark = if result.success {
+            success_count += 1;
+            style("✓").green()
+        } else {
             fail_count += 1;
-        }
+            style("✗").red()
+        };
+        println!("  {mark} {repo_name} {}{stash_note}", result.message);
     }
 
     println!();
     if fail_count > 0 {
-        println!(
-            "Restored {} repo(s), {} failed",
-            style(success_count).green(),
-            style(fail_count).red()
-        );
-    } else {
-        println!("{} Restored {} repo(s)", style("✓").green(), success_count);
+        return Ok(CommandResult::Error(format!(
+            "Restored {success_count} repo(s), {fail_count} failed"
+        )));
     }
+    println!("{} Restored {} repo(s)", style("✓").green(), success_count);
 
     Ok(CommandResult::Message(String::new()))
 }

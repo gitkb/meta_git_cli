@@ -3,10 +3,9 @@ use chrono::Utc;
 use colored::*;
 use std::path::Path;
 
-use meta_cli::worktree::discover_worktree_repos;
-use meta_git_lib::worktree::git_ops::remove_worktree_repos;
-use meta_git_lib::worktree::helpers::find_meta_dir;
+use meta_git_lib::worktree::helpers::{find_meta_dir, lookup_nested_project};
 use meta_git_lib::worktree::hooks::fire_post_prune;
+use meta_git_lib::worktree::safety::{check_worktree_removal, delete_checked_set};
 use meta_git_lib::worktree::store::{entry_ttl_remaining, store_list, store_remove_batch};
 use meta_git_lib::worktree::types::*;
 
@@ -52,10 +51,19 @@ fn check_repo_orphaned(
         return None; // Can't check without config
     };
 
+    // "." is the project's own repo and always exists, so a set holding it is
+    // never orphaned. Nested aliases ("sub/leaf") live in child .meta files,
+    // not the top-level project list.
     let missing_count = entry
         .repos
         .iter()
-        .filter(|store_repo| !projects.iter().any(|p| p.name == store_repo.alias))
+        .map(|r| r.alias.as_str())
+        .filter(|alias| {
+            *alias != "."
+                && !projects.iter().any(|p| p.name == *alias)
+                && !(alias.contains('/')
+                    && lookup_nested_project(Path::new(&entry.project), alias).is_ok())
+        })
         .count();
 
     if missing_count > 0 && missing_count == entry.repos.len() {
@@ -63,6 +71,13 @@ fn check_repo_orphaned(
     } else {
         None
     }
+}
+
+/// Only a path that is really gone counts as missing. A dangling link or a
+/// path prune can't inspect (permission denied) exists, so it gets checked
+/// and kept, never forgotten.
+fn is_missing(path: &Path) -> bool {
+    matches!(path.symlink_metadata(), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
 }
 
 pub(crate) fn handle_prune(
@@ -80,6 +95,7 @@ pub(crate) fn handle_prune(
                 "{}",
                 serde_json::to_string_pretty(&PruneOutput {
                     removed: vec![],
+                    kept: vec![],
                     dry_run,
                 })?
             );
@@ -100,7 +116,7 @@ pub(crate) fn handle_prune(
         let wt_path = Path::new(path_key);
 
         // Check if path exists (orphaned detection)
-        if !wt_path.exists() {
+        if is_missing(wt_path) {
             to_remove.push(create_prune_entry(
                 entry.name.clone(),
                 path_key.clone(),
@@ -137,8 +153,8 @@ pub(crate) fn handle_prune(
         if let Some(remaining) = entry_ttl_remaining(entry, now) {
             if remaining <= 0 {
                 // Total age = configured TTL + seconds past expiry
-                let overdue = (-remaining) as u64;
-                let age = entry.ttl_seconds.unwrap() + overdue;
+                let overdue = remaining.unsigned_abs();
+                let age = entry.ttl_seconds.unwrap_or(0).saturating_add(overdue);
                 to_remove.push(create_prune_entry(
                     entry.name.clone(),
                     path_key.clone(),
@@ -149,68 +165,114 @@ pub(crate) fn handle_prune(
         }
     }
 
-    if to_remove.is_empty() {
+    // Prune never discards work: a candidate whose directory holds anything
+    // that deleting it would lose is kept, with the reason.
+    let mut kept = Vec::new();
+    let mut candidates = Vec::new();
+    for entry in to_remove {
+        let wt_path = Path::new(&entry.path);
+        if is_missing(wt_path) {
+            candidates.push((entry, None));
+            continue;
+        }
+        // Deleting a set would delete any recorded set inside it.
+        let nested: Vec<&str> = store
+            .worktrees
+            .keys()
+            .map(String::as_str)
+            .filter(|k| Path::new(k) != wt_path && Path::new(k).starts_with(wt_path))
+            .collect();
+        let problems = match check_worktree_removal(wt_path) {
+            _ if !nested.is_empty() => {
+                format!("it holds other worktree sets: {}", nested.join(", "))
+            }
+            Ok(check) if check.is_clear() => {
+                candidates.push((entry, Some(check)));
+                continue;
+            }
+            Ok(check) => [check.blockers, check.unsaved].concat().join("; "),
+            Err(e) => format!("cannot inspect it: {e:#}"),
+        };
+        kept.push(create_prune_entry(
+            entry.name,
+            entry.path,
+            format!("{}, but {problems}", entry.reason),
+            entry.age_seconds,
+        ));
+    }
+
+    if dry_run || candidates.is_empty() {
+        let would_remove: Vec<PruneEntry> = candidates.into_iter().map(|(e, _)| e).collect();
         if json {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&PruneOutput {
-                    removed: vec![],
+                    removed: would_remove,
+                    kept: kept.clone(),
                     dry_run,
                 })?
             );
         } else {
-            println!("Nothing to prune.");
-        }
-        return Ok(());
-    }
-
-    if dry_run {
-        if json {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&PruneOutput {
-                    removed: to_remove,
-                    dry_run: true,
-                })?
-            );
-        } else {
-            println!("Would prune {} worktree(s):", to_remove.len());
-            for entry in &to_remove {
-                println!("  {} ({}) — {}", entry.name, entry.reason, entry.path);
+            if would_remove.is_empty() {
+                println!("Nothing to prune.");
+            } else {
+                println!("Would prune {} worktree(s):", would_remove.len());
+                for entry in &would_remove {
+                    println!("  {} ({}) — {}", entry.name, entry.reason, entry.path);
+                }
             }
+            print_kept(&kept);
+        }
+        if !dry_run {
+            warn_kept(&kept, strict)?;
         }
         return Ok(());
     }
 
     // Actually remove: physical cleanup first, then batch store update.
     let mut removed = Vec::new();
-    for prune_entry in &to_remove {
+    let mut failed = Vec::new();
+    for (prune_entry, check) in candidates {
         let wt_path = Path::new(&prune_entry.path);
-
-        if wt_path.exists() {
-            // Try to properly remove via git worktree remove
-            let repos = discover_worktree_repos(wt_path).unwrap_or_default();
-            let _ = remove_worktree_repos(&repos, true, false);
-
-            // Clean up directory
-            let _ = std::fs::remove_dir_all(wt_path);
-
-            // Only record as removed if directory is actually gone
-            if wt_path.exists() {
-                super::warn_or_bail(
-                    strict,
-                    format!("Failed to remove directory: {}", wt_path.display()),
-                )?;
+        let removal = match &check {
+            Some(check) => delete_checked_set(wt_path, check, false, false),
+            // A missing directory only loses its record. One that has
+            // reappeared since was never checked: keep it, nothing failed.
+            None if !is_missing(wt_path) => {
+                kept.push(create_prune_entry(
+                    prune_entry.name,
+                    prune_entry.path,
+                    format!("{}, but it reappeared", prune_entry.reason),
+                    prune_entry.age_seconds,
+                ));
                 continue;
             }
+            None => Ok(()),
+        };
+        match removal {
+            Ok(()) => removed.push(prune_entry),
+            Err(e) => {
+                failed.push(prune_entry.name.clone());
+                kept.push(create_prune_entry(
+                    prune_entry.name,
+                    prune_entry.path,
+                    format!("{}, but removing it failed: {e:#}", prune_entry.reason),
+                    prune_entry.age_seconds,
+                ));
+            }
         }
-
-        removed.push(prune_entry.clone());
     }
 
-    // Batch-remove all pruned entries from store in a single lock cycle
-    let keys_to_remove: Vec<String> = removed.iter().map(|e| e.path.clone()).collect();
-    super::warn_store_error(store_remove_batch(&keys_to_remove), strict)?;
+    // Batch-remove the pruned records in a single lock cycle, each only if it
+    // is still the record this run read.
+    let records: Vec<(String, String)> = removed
+        .iter()
+        .filter_map(|e| {
+            let entry = store.worktrees.get(&e.path)?;
+            Some((e.path.clone(), entry.created_at.clone()))
+        })
+        .collect();
+    super::warn_store_error(store_remove_batch(&records), strict)?;
 
     // Fire post-prune hook
     let meta_dir = find_meta_dir();
@@ -221,6 +283,7 @@ pub(crate) fn handle_prune(
             "{}",
             serde_json::to_string_pretty(&PruneOutput {
                 removed,
+                kept: kept.clone(),
                 dry_run: false,
             })?
         );
@@ -229,9 +292,32 @@ pub(crate) fn handle_prune(
         for entry in &removed {
             println!("  {} ({}) — {}", entry.name, entry.reason, entry.path);
         }
+        print_kept(&kept);
     }
 
-    Ok(())
+    if !failed.is_empty() {
+        anyhow::bail!("Failed to prune: {}", failed.join(", "));
+    }
+    warn_kept(&kept, strict)
+}
+
+fn print_kept(kept: &[PruneEntry]) {
+    if kept.is_empty() {
+        return;
+    }
+    println!("Kept {} worktree(s):", kept.len());
+    for entry in kept {
+        println!("  {} ({}) — {}", entry.name, entry.reason, entry.path);
+    }
+}
+
+/// Kept worktrees are a warning, and an error in strict mode.
+fn warn_kept(kept: &[PruneEntry], strict: bool) -> Result<()> {
+    if kept.is_empty() {
+        return Ok(());
+    }
+    let names: Vec<&str> = kept.iter().map(|e| e.name.as_str()).collect();
+    super::warn_or_bail(strict, format!("Kept worktrees: {}", names.join(", ")))
 }
 
 #[cfg(test)]
@@ -366,6 +452,42 @@ mod tests {
 
         // Only partial orphan - should return None (worktree is still partially valid)
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn check_repo_orphaned_never_counts_the_root_repo_as_missing() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_path = temp_dir.path();
+        let meta_config = r#"{"projects":{"repo3":"git@github.com:org/repo3.git"}}"#;
+        std::fs::write(project_path.join(".meta"), meta_config).unwrap();
+        let project = project_path.to_str().unwrap();
+        let mut cache = HashMap::new();
+
+        let root_only = make_store_entry("root-only", project, vec![(".", "main")]);
+        assert!(check_repo_orphaned(&root_only, &mut cache).is_none());
+
+        let root_and_removed =
+            make_store_entry("removed", project, vec![(".", "main"), ("repo1", "main")]);
+        assert!(check_repo_orphaned(&root_and_removed, &mut cache).is_none());
+    }
+
+    #[test]
+    fn check_repo_orphaned_finds_nested_aliases() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_path = temp_dir.path();
+        let meta_config =
+            r#"{"projects":{"sub":{"repo":"git@github.com:org/sub.git","meta":true}}}"#;
+        std::fs::write(project_path.join(".meta"), meta_config).unwrap();
+        std::fs::create_dir(project_path.join("sub")).unwrap();
+        let sub_config = r#"{"projects":{"leaf":"git@github.com:org/leaf.git"}}"#;
+        std::fs::write(project_path.join("sub/.meta"), sub_config).unwrap();
+
+        let entry = make_store_entry(
+            "nested",
+            project_path.to_str().unwrap(),
+            vec![("sub/leaf", "main")],
+        );
+        assert!(check_repo_orphaned(&entry, &mut HashMap::new()).is_none());
     }
 
     #[test]

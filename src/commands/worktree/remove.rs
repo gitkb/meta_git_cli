@@ -1,11 +1,10 @@
 use anyhow::Result;
 use colored::*;
 
-use meta_cli::worktree::discover_worktree_repos;
-use meta_git_lib::worktree::git_ops::*;
 use meta_git_lib::worktree::helpers::*;
 use meta_git_lib::worktree::hooks::fire_post_destroy;
-use meta_git_lib::worktree::store::store_remove;
+use meta_git_lib::worktree::safety::{check_worktree_removal, delete_checked_set};
+use meta_git_lib::worktree::store::{store_get, store_remove_batch, store_sets_inside};
 use meta_git_lib::worktree::types::*;
 
 use super::cli_types::DestroyArgs;
@@ -28,39 +27,56 @@ pub(crate) fn handle_remove(
         anyhow::bail!("Worktree '{}' not found at {}", name, wt_dir.display());
     }
 
-    let repos = discover_worktree_repos(&wt_dir)?;
+    // Only delete what meta created: the store records every worktree set it made.
+    let Some((record_key, record)) = store_get(&wt_dir)? else {
+        anyhow::bail!(
+            "Refusing to remove {}: meta has no record of creating a worktree there.\n\
+             If it is a worktree whose record was lost, delete it yourself and run \
+             'git worktree prune' in its repositories.",
+            wt_dir.display()
+        );
+    };
 
-    // Check for dirty repos (unless --force)
-    if !force {
-        let dirty_repos: Vec<&str> = repos
-            .iter()
-            .filter(|r| {
-                git_status_summary(&r.path)
-                    .map(|s| s.dirty)
-                    .unwrap_or(false)
-            })
-            .map(|r| r.alias.as_str())
-            .collect();
-
-        if !dirty_repos.is_empty() {
+    let check = check_worktree_removal(&wt_dir)?;
+    let nested = store_sets_inside(&wt_dir)?;
+    let blockers: Vec<String> = check
+        .blockers
+        .iter()
+        .cloned()
+        .chain(
+            nested
+                .iter()
+                .map(|k| format!("{k}: another worktree set; remove it first")),
+        )
+        .collect();
+    if !blockers.is_empty() {
+        anyhow::bail!(
+            "Refusing to remove worktree '{name}':\n  {}\n\
+             meta only deletes linked worktrees it can check; move or delete these yourself first.",
+            blockers.join("\n  ")
+        );
+    }
+    if !check.unsaved.is_empty() {
+        let found = check.unsaved.join("\n  ");
+        if !force {
             anyhow::bail!(
-                "Worktree '{}' has uncommitted changes in: {}.\nUse --force to remove anyway.",
-                name,
-                dirty_repos.join(", ")
+                "Worktree '{name}' has work that removing it would lose:\n  {found}\n\
+                 Commit and push it, or use --force to discard it."
             );
         }
+        eprintln!(
+            "{} discarding work in worktree '{name}':\n  {found}",
+            "warning:".yellow().bold()
+        );
     }
 
-    // Remove worktrees in correct order (children first, "." last)
-    remove_worktree_repos(&repos, force, verbose)?;
-
-    // Clean up directory if it still exists
-    if wt_dir.exists() {
-        std::fs::remove_dir_all(&wt_dir).ok();
-    }
+    // Remove exactly what was checked, nested worktrees first
+    delete_checked_set(&wt_dir, &check, force, verbose)?;
 
     // Remove from centralized store
-    super::warn_store_error(store_remove(&wt_dir), strict)?;
+    // By the key read before deleting: the deleted path can't be resolved again.
+    let record = [(record_key, record.created_at)];
+    super::warn_store_error(store_remove_batch(&record), strict)?;
 
     // Fire post-destroy hook
     fire_post_destroy(name, &wt_dir, force, meta_dir.as_deref());
@@ -69,7 +85,7 @@ pub(crate) fn handle_remove(
         let output = DestroyOutput {
             name: name.to_string(),
             path: wt_dir.display().to_string(),
-            repos_removed: repos.len(),
+            repos_removed: check.members.len(),
         };
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {

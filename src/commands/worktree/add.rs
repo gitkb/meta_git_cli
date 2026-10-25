@@ -64,7 +64,7 @@ pub(crate) fn handle_add(args: AddArgs, verbose: bool, json: bool, strict: bool)
             );
         }
 
-        let created_branch = git_worktree_add(&source, &dest, &branch, None)?;
+        let created_branch = git_worktree_add(&source, &dest, &branch, None)?.is_some();
         added.push(CreateRepoEntry {
             alias: spec.alias.clone(),
             path: dest.display().to_string(),

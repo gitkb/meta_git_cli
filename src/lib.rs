@@ -69,7 +69,7 @@ pub fn execute_command(
 
     let result = match command {
         // These act on repos they find themselves, not on the selected ones
-        "git snapshot restore" | "git update"
+        "git snapshot restore" | "git update" | "git clone"
             if options.include_filters.is_some() || options.exclude_filters.is_some() =>
         {
             Err(anyhow::anyhow!(

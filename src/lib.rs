@@ -73,7 +73,7 @@ pub fn execute_command(
             if options.include_filters.is_some() || options.exclude_filters.is_some() =>
         {
             Err(anyhow::anyhow!(
-                "meta {command} works on every repo in the workspace; it does not take --include/--exclude"
+                "meta {command} finds its repos itself (in the snapshot or the .meta files); it does not take --include/--exclude"
             ))
         }
         "git status" => status::execute_git_status(projects, options, cwd),
@@ -175,15 +175,15 @@ fn build_passthrough_git_help(
 
     Some(format!(
         "meta git {subcommand} - Pass-through git command\n\n\
-Usage: meta git {subcommand} [GIT_ARGS...] [META_OPTIONS]\n\n\
+Usage: meta [META_OPTIONS] git {subcommand} [GIT_ARGS...]\n\n\
 Runs `{display_command}` in each repo in the current meta workspace.\n\n\
 {scope}\n\n\
 Meta options:\n\
   --dry-run             Show the command that would run in each repo\n\
   --recursive           Include repos from nested meta workspaces\n\
   --depth <N>           Limit recursive traversal depth\n\
-  --include <REPOS>     Only run in specified repos/directories\n\
-  --exclude <REPOS>     Skip specified repos/directories\n\
+  --include <REPOS>     Only these repos (.meta name or path from the root)\n\
+  --exclude <REPOS>     Skip these repos (.meta name or path from the root)\n\
   --tag <TAGS>          Filter by project tag(s), comma-separated\n\
   --parallel            Run repo commands concurrently\n\
   --sequential          Run repo commands one at a time\n\n\

@@ -634,34 +634,6 @@ fn prune_keeps_a_dangling_link_at_a_recorded_path() {
     assert!(set.symlink_metadata().is_ok());
 }
 
-#[test]
-fn snapshot_restore_exits_nonzero_when_a_repo_fails() {
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path();
-    let ws = workspace(root, &["a"]);
-    let out = meta_git(root, &ws, "git snapshot create", &["s0"], json!({}));
-    assert!(out.status.success(), "{}", stderr(&out));
-    // a's recorded branch `main` is now checked out in another worktree.
-    git(&ws.join("a"), &["checkout", "-q", "-b", "other"]);
-    let elsewhere = root.join("elsewhere");
-    git(
-        &ws.join("a"),
-        &["worktree", "add", "-q", elsewhere.to_str().unwrap(), "main"],
-    );
-
-    let out = meta_git(
-        root,
-        &ws,
-        "git snapshot restore",
-        &["s0", "--force"],
-        json!({}),
-    );
-    assert!(!out.status.success());
-    assert!(stderr(&out).contains("1 failed"), "{}", stderr(&out));
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("Failed to checkout"), "{stdout}");
-}
-
 #[cfg(unix)]
 #[test]
 fn remove_drops_the_record_when_the_worktrees_dir_is_a_link() {

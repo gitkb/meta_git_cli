@@ -2,13 +2,15 @@ use anyhow::Result;
 use colored::*;
 use std::path::Path;
 
+use meta_cli::repo_filter;
 use meta_cli::worktree::{discover_worktree_repos, WorktreeRepoInfo};
 use meta_git_lib::worktree::helpers::*;
 
 use super::cli_types::{CreateArgs, DestroyArgs, ExecArgs};
 use crate::git_env;
 
-/// Runs in each of `repos`, naming them by their path from `wt_dir`.
+/// Runs in each of `repos` that `--include`/`--exclude` select (by alias:
+/// its path from `wt_dir`), naming them by that path.
 fn build_loop_config(
     wt_dir: &Path,
     repos: &[WorktreeRepoInfo],
@@ -17,20 +19,19 @@ fn build_loop_config(
     parallel: bool,
     verbose: bool,
     json: bool,
-) -> loop_lib::LoopConfig {
-    loop_lib::LoopConfig {
-        directories: repos.iter().map(|r| r.path.display().to_string()).collect(),
+) -> Result<loop_lib::LoopConfig> {
+    let directories: Vec<String> = repos.iter().map(|r| r.path.display().to_string()).collect();
+    // A member sits at its alias, so its path in the set is its name
+    let directories = repo_filter::select(
+        &include_filters,
+        &exclude_filters,
+        &directories,
+        wt_dir,
+        &[],
+    )?;
+    Ok(loop_lib::LoopConfig {
+        directories,
         ignore: vec![],
-        include_filters: if include_filters.is_empty() {
-            None
-        } else {
-            Some(include_filters)
-        },
-        exclude_filters: if exclude_filters.is_empty() {
-            None
-        } else {
-            Some(exclude_filters)
-        },
         verbose,
         silent: false,
         parallel,
@@ -41,7 +42,7 @@ fn build_loop_config(
         env: Some(git_env::git_env()),
         max_parallel: None,
         root_dir: Some(wt_dir.to_path_buf()),
-    }
+    })
 }
 
 /// RAII guard that removes an ephemeral worktree on drop.
@@ -84,7 +85,6 @@ pub(crate) fn handle_exec(args: ExecArgs, verbose: bool, json: bool) -> Result<(
     let name = &args.name;
     let repos = discover_and_validate_worktree(name)?;
 
-    let command_str = args.command.join(" ");
     let config = build_loop_config(
         &resolve_existing_worktree(name)?.wt_dir,
         &repos,
@@ -93,9 +93,9 @@ pub(crate) fn handle_exec(args: ExecArgs, verbose: bool, json: bool) -> Result<(
         args.parallel,
         verbose,
         json,
-    );
+    )?;
 
-    loop_lib::run(&config, &command_str)?;
+    loop_lib::run(&config, &args.command)?;
     Ok(())
 }
 
@@ -152,7 +152,6 @@ fn handle_ephemeral_exec(args: ExecArgs, verbose: bool, json: bool) -> Result<()
     // Run the command
     let repos = discover_worktree_repos(&wt_dir)?;
 
-    let command_str = cmd_parts.join(" ");
     let config = build_loop_config(
         &wt_dir,
         &repos,
@@ -163,7 +162,7 @@ fn handle_ephemeral_exec(args: ExecArgs, verbose: bool, json: bool) -> Result<()
         json,
     );
 
-    let exec_result = loop_lib::run(&config, &command_str);
+    let exec_result = config.and_then(|config| loop_lib::run(&config, &cmd_parts));
 
     // Explicitly drop guard to trigger cleanup before propagating result
     drop(guard);

@@ -80,8 +80,6 @@ pub(crate) fn execute_git_commit(
         execute_editor_commit(&repos_with_changes)?;
     } else if let Some(msg) = message {
         // Apply same message to all repos - use ExecutionPlan for proper dry-run support
-        // Escape the message for shell (replace single quotes)
-        let escaped_msg = msg.replace('\'', "'\\''");
         let commands: Vec<PlannedCommand> = repos_with_changes
             .iter()
             .map(|(name, path, _files)| {
@@ -93,7 +91,9 @@ pub(crate) fn execute_git_commit(
                 };
                 PlannedCommand {
                     dir,
-                    cmd: format!("git commit -m '{escaped_msg}'"),
+                    argv: ["git", "commit", "-m", msg.as_str()]
+                        .map(str::to_string)
+                        .to_vec(),
                     env: None,
                 }
             })

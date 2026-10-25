@@ -62,6 +62,14 @@ pub fn execute_command(
     }
 
     let result = match command {
+        // These act on repos they find themselves, not on the selected ones
+        "git snapshot restore" | "git update"
+            if options.include_filters.is_some() || options.exclude_filters.is_some() =>
+        {
+            Err(anyhow::anyhow!(
+                "meta {command} works on every repo in the workspace; it does not take --include/--exclude"
+            ))
+        }
         "git status" => status::execute_git_status(projects, options, cwd),
         "git clone" => clone::execute_git_clone(args, options, cwd),
         "git update" => update::execute_git_update(projects, options.dry_run, cwd),
@@ -70,11 +78,6 @@ pub fn execute_command(
         "git snapshot create" => snapshot::execute_snapshot_create(args, projects, cwd),
         "git snapshot list" => snapshot::execute_snapshot_list(cwd),
         "git snapshot show" => snapshot::execute_snapshot_show(args, cwd),
-        "git snapshot restore" if options.include_filters.is_some() || options.exclude_filters.is_some() => {
-            Err(anyhow::anyhow!(
-                "meta git snapshot restore restores every repo in the snapshot; it does not take --include/--exclude"
-            ))
-        }
         "git snapshot restore" => {
             snapshot::execute_snapshot_restore(args, projects, options.dry_run, cwd)
         }

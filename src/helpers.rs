@@ -26,21 +26,3 @@ pub(crate) fn get_project_directories(cwd: &Path) -> anyhow::Result<Vec<String>>
     dirs.extend(paths);
     Ok(dirs)
 }
-
-/// Get all repository directories for snapshot operations (recursive by default)
-pub(crate) fn get_all_repo_directories(
-    projects: &[String],
-    cwd: &Path,
-) -> anyhow::Result<Vec<String>> {
-    if !projects.is_empty() {
-        return Ok(projects.to_vec());
-    }
-
-    let tree = match config::walk_meta_tree(cwd, None) {
-        Ok(t) => t,
-        Err(_) => return Ok(vec![".".to_string()]),
-    };
-    let mut dirs = vec![".".to_string()];
-    dirs.extend(config::flatten_meta_tree(&tree));
-    Ok(dirs)
-}

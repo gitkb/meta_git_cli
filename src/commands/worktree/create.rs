@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::Utc;
 use colored::*;
 use std::collections::{HashMap, HashSet};
@@ -7,6 +7,7 @@ use meta_cli::dependency_graph::{DependencyGraph, ProjectDependencies};
 use meta_git_lib::worktree::git_ops::*;
 use meta_git_lib::worktree::helpers::*;
 use meta_git_lib::worktree::hooks::fire_post_create;
+use meta_git_lib::worktree::safety::{check_worktree_removal, delete_checked_set};
 use meta_git_lib::worktree::store::store_add;
 use meta_git_lib::worktree::types::{
     CreateOutput, CreateRepoEntry, StoreRepoEntry, WorktreeStoreEntry,
@@ -162,138 +163,137 @@ pub(crate) fn handle_create(
     let mut repos_to_create = repos_to_create;
     let from_pr_info = from_pr_spec.map(resolve_from_pr).transpose()?;
     if let Some((ref pr_repo_spec, _pr_num, ref pr_branch)) = from_pr_info {
-        let mut matched = false;
-        for (alias, source, branch) in repos_to_create.iter_mut() {
-            if *alias != "." && repo_matches_spec(source, pr_repo_spec) {
-                // Fetch the PR branch
-                if let Err(e) = git_fetch_branch(source, pr_branch) {
-                    super::warn_or_bail(
-                        strict,
-                        format!("Failed to fetch PR branch '{pr_branch}': {e}"),
-                    )?;
-                }
-                *branch = pr_branch.clone();
-                matched = true;
-                break;
-            }
-        }
-        if !matched {
-            super::warn_or_bail(
-                strict,
-                format!("No repo matches '{pr_repo_spec}'. PR branch '{pr_branch}' not applied."),
-            )?;
-        }
+        let (alias, source, branch) = repos_to_create
+            .iter_mut()
+            .find(|(alias, source, _)| alias != "." && repo_matches_spec(source, pr_repo_spec))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "No selected repo has origin '{pr_repo_spec}', so PR branch '{pr_branch}' can't be applied"
+                )
+            })?;
+        git_fetch_branch(source, pr_branch)
+            .map_err(|e| e.context(format!("Cannot fetch the PR branch into '{alias}'")))?;
+        *branch = pr_branch.clone();
     }
 
-    let dot_included = repos_to_create.iter().any(|(a, _, _)| a == ".");
+    // Claim the set directory atomically: if another create claimed it first,
+    // this fails and nothing of theirs is touched. Everything in it from here
+    // on was made by this call.
+    if let Some(parent) = wt_dir.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if let Err(e) = std::fs::create_dir(&wt_dir) {
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            anyhow::bail!("Worktree '{name}' already exists at {}", wt_dir.display());
+        }
+        return Err(e).with_context(|| format!("Cannot create {}", wt_dir.display()));
+    }
+
+    // Anything that fails from here rolls back what this call created.
     let mut created_repos = Vec::new();
-
-    // If "." is included, create it first (it becomes the worktree root).
-    // git worktree add creates the target dir, so we skip create_dir_all.
-    let mut dot_created = false;
-    if dot_included {
-        let (_, source, branch) = repos_to_create.iter().find(|(a, _, _)| a == ".").unwrap();
-
-        if verbose {
-            eprintln!(
-                "Creating meta repo worktree at {} (branch: {})",
-                wt_dir.display(),
-                branch
-            );
-        }
-
-        // Ensure parent exists (git worktree add creates the leaf dir)
-        if let Some(parent) = wt_dir.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        match git_worktree_add(source, &wt_dir, branch, from_ref) {
-            Ok(created_branch) => {
+    let mut new_branches = Vec::new();
+    let built = (|| -> Result<()> {
+        // If "." is included, create it first (it becomes the worktree root;
+        // git accepts the empty directory claimed above).
+        if let Some((_, source, branch)) = repos_to_create.iter().find(|(a, _, _)| a == ".") {
+            if let Some(r) = missing_ref(source, from_ref)? {
+                // --from-ref: skip root repo if ref doesn't exist (same as child repos)
+                super::warn_or_bail(strict, format!("Skipping '.': ref '{r}' not found"))?;
+            } else {
+                if verbose {
+                    eprintln!(
+                        "Creating meta repo worktree at {} (branch: {})",
+                        wt_dir.display(),
+                        branch
+                    );
+                }
+                let created_branch = journal_new_branch(source, branch, &mut new_branches, || {
+                    git_worktree_add(source, &wt_dir, branch, from_ref)
+                })?;
                 created_repos.push(CreateRepoEntry {
                     alias: ".".to_string(),
                     path: wt_dir.display().to_string(),
                     branch: branch.clone(),
                     created_branch,
                 });
-                dot_created = true;
-            }
-            Err(e) if from_ref.is_some() => {
-                // --from-ref: skip root repo if ref doesn't exist (same as child repos)
-                super::warn_or_bail(strict, format!("Skipping '.': {e}"))?;
-            }
-            Err(e) => return Err(e),
-        }
-    }
-
-    // Ensure wt_dir exists for child repos (when "." isn't included or was skipped, it wasn't created by git)
-    if !dot_created {
-        std::fs::create_dir_all(&wt_dir)?;
-    }
-
-    // Create child repo worktrees
-    for (alias, source, branch) in &repos_to_create {
-        if alias == "." {
-            continue;
-        }
-
-        // Preserve the full alias as the destination path so that relative
-        // references (e.g., Cargo.toml workspace members) remain valid.
-        // "vendor/tree-sitter-markdown" -> "vendor/tree-sitter-markdown"
-        // Simple aliases are unchanged: "core" -> "core"
-        let dest = wt_dir.join(alias);
-
-        // Ensure parent directories exist for nested paths (e.g., "vendor/")
-        if let Some(parent) = dest.parent() {
-            if parent != wt_dir {
-                std::fs::create_dir_all(parent)?;
             }
         }
 
-        if verbose {
-            eprintln!(
-                "Creating worktree for '{}' at {} (branch: {})",
-                alias,
-                dest.display(),
-                branch
-            );
-        }
-
-        match git_worktree_add(source, &dest, branch, from_ref) {
-            Ok(created_branch) => {
-                created_repos.push(CreateRepoEntry {
-                    alias: alias.clone(),
-                    path: dest.display().to_string(),
-                    branch: branch.clone(),
-                    created_branch,
-                });
-            }
-            Err(e) if from_ref.is_some() => {
-                // --from-ref: skip repos where ref doesn't exist
-                super::warn_or_bail(strict, format!("Skipping '{alias}': {e}"))?;
+        // Create child repo worktrees
+        for (alias, source, branch) in &repos_to_create {
+            if alias == "." {
                 continue;
             }
-            Err(e) => return Err(e),
+            if let Some(r) = missing_ref(source, from_ref)? {
+                // --from-ref: skip repos where ref doesn't exist
+                super::warn_or_bail(strict, format!("Skipping '{alias}': ref '{r}' not found"))?;
+                continue;
+            }
+
+            // Preserve the full alias as the destination path so that relative
+            // references (e.g., Cargo.toml workspace members) remain valid.
+            // "vendor/tree-sitter-markdown" -> "vendor/tree-sitter-markdown"
+            // Simple aliases are unchanged: "core" -> "core"
+            let dest = wt_dir.join(alias);
+
+            // Ensure parent directories exist for nested paths (e.g., "vendor/")
+            if let Some(parent) = dest.parent() {
+                if parent != wt_dir {
+                    std::fs::create_dir_all(parent)?;
+                }
+            }
+
+            if verbose {
+                eprintln!(
+                    "Creating worktree for '{}' at {} (branch: {})",
+                    alias,
+                    dest.display(),
+                    branch
+                );
+            }
+
+            // Any failure other than a missing ref is a failed create.
+            let created_branch = journal_new_branch(source, branch, &mut new_branches, || {
+                git_worktree_add(source, &dest, branch, from_ref)
+            })?;
+            created_repos.push(CreateRepoEntry {
+                alias: alias.clone(),
+                path: dest.display().to_string(),
+                branch: branch.clone(),
+                created_branch,
+            });
         }
-    }
 
-    // Ensure .worktrees/ is in .gitignore
-    let dirname = worktree_root
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or(".worktrees");
-    ensure_worktrees_in_gitignore(&meta_dir, dirname, json)?;
+        if created_repos.is_empty() {
+            // Every repo was skipped because none has the ref.
+            match from_ref {
+                Some(r) => anyhow::bail!("No selected repo has ref '{r}'; no worktree was created"),
+                None => anyhow::bail!("No repos selected; no worktree was created"),
+            }
+        }
 
-    // Add to centralized store
-    let store_entry = WorktreeStoreEntry {
-        name: name.to_string(),
-        project: meta_dir.to_string_lossy().to_string(),
-        created_at: Utc::now().to_rfc3339(),
-        ephemeral,
-        ttl_seconds,
-        repos: created_repos.iter().map(StoreRepoEntry::from).collect(),
-        custom: custom_meta.clone(),
-    };
-    super::warn_store_error(store_add(&wt_dir, store_entry), strict)?;
+        // Ensure .worktrees/ is in .gitignore
+        let dirname = worktree_root
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(".worktrees");
+        ensure_worktrees_in_gitignore(&meta_dir, dirname, json)?;
+
+        // Add to centralized store
+        let store_entry = WorktreeStoreEntry {
+            name: name.to_string(),
+            project: meta_dir.to_string_lossy().to_string(),
+            created_at: Utc::now().to_rfc3339(),
+            ephemeral,
+            ttl_seconds,
+            repos: created_repos.iter().map(StoreRepoEntry::from).collect(),
+            custom: custom_meta.clone(),
+        };
+        // `remove` and `prune` delete only recorded worktrees, so an unrecorded one
+        // would be stranded: failing to record is a failed create.
+        store_add(&wt_dir, store_entry).context("Cannot record the new worktree")
+    })();
+    built.map_err(|e| roll_back(&wt_dir, &new_branches, e))?;
 
     // Fire post-create hook
     fire_post_create(
@@ -340,6 +340,86 @@ pub(crate) fn handle_create(
     }
 
     Ok(())
+}
+
+/// The `--from-ref` a repo doesn't have, if any: such repos are skipped. A
+/// repo git can't read is an error, not a missing ref.
+fn missing_ref<'a>(repo: &std::path::Path, from_ref: Option<&'a str>) -> Result<Option<&'a str>> {
+    match from_ref {
+        Some(r) if git_rev_parse(repo, &format!("{r}^{{commit}}"))?.is_none() => Ok(Some(r)),
+        _ => Ok(None),
+    }
+}
+
+/// Run a `git worktree add` and note the branch it created, with the commit
+/// it was created at, so a rollback deletes only branches this call made and
+/// only while they still point there (a post-checkout hook may have committed
+/// on one). A branch that appears although the add failed may belong to
+/// someone else: it is kept and named in the error.
+fn journal_new_branch(
+    repo: &std::path::Path,
+    branch: &str,
+    journal: &mut Vec<(std::path::PathBuf, String, String)>,
+    add: impl FnOnce() -> Result<Option<String>>,
+) -> Result<bool> {
+    let branch_ref = format!("refs/heads/{branch}");
+    let existed = git_rev_parse(repo, &branch_ref)?.is_some();
+    match add() {
+        Ok(Some(start)) => {
+            journal.push((repo.to_path_buf(), branch.to_string(), start));
+            Ok(true)
+        }
+        Ok(None) => Ok(false),
+        Err(e) if !existed && matches!(git_rev_parse(repo, &branch_ref), Ok(Some(_))) => Err(e
+            .context(format!(
+                "branch '{branch}' now exists in {} and was kept: meta can't tell whether this \
+             create made it",
+                repo.display()
+            ))),
+        Err(e) => Err(e),
+    }
+}
+
+/// Undo a failed create: delete the set this call claimed, if the removal
+/// check finds nothing to lose, and the branches it created, if they still
+/// point where it left them. Returns the error to report.
+fn roll_back(
+    wt_dir: &std::path::Path,
+    new_branches: &[(std::path::PathBuf, String, String)],
+    error: anyhow::Error,
+) -> anyhow::Error {
+    let undone = check_worktree_removal(wt_dir).and_then(|check| {
+        let problems = [check.blockers.clone(), check.unsaved.clone()].concat();
+        anyhow::ensure!(problems.is_empty(), "{}", problems.join("; "));
+        delete_checked_set(wt_dir, &check, false, false)
+    });
+    if let Err(undo) = undone {
+        let branches: Vec<&str> = new_branches.iter().map(|(_, b, _)| b.as_str()).collect();
+        return anyhow::anyhow!(
+            "{error:#}\nThe partly created worktree at {} was left in place ({undo:#}); \
+             delete it yourself and run 'git worktree prune' in its repositories. \
+             Branches this create made: {}",
+            wt_dir.display(),
+            if branches.is_empty() {
+                "none".to_string()
+            } else {
+                branches.join(", ")
+            }
+        );
+    }
+    let kept: Vec<String> = new_branches
+        .iter()
+        .filter_map(|(repo, branch, tip)| git_delete_branch_at(repo, branch, tip).err())
+        .map(|e| format!("{e:#}"))
+        .collect();
+    if kept.is_empty() {
+        error
+    } else {
+        anyhow::anyhow!(
+            "{error:#}\nRolled back, but kept branches: {}",
+            kept.join("; ")
+        )
+    }
 }
 
 struct CreateDryRunPlan<'a> {
@@ -723,4 +803,53 @@ fn ensure_intermediate_parents(
     result.extend(rest);
 
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command;
+
+    fn git(dir: &std::path::Path, args: &[&str]) {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    fn journal_keeps_only_branches_this_call_created() {
+        let tmp = tempfile::tempdir().unwrap();
+        git(tmp.path(), &["init", "-q"]);
+        git(tmp.path(), &["commit", "-q", "--allow-empty", "-m", "init"]);
+        let mut journal = Vec::new();
+
+        // Our add created the branch: journaled.
+        let created = journal_new_branch(tmp.path(), "ours", &mut journal, || {
+            git(tmp.path(), &["branch", "ours"]);
+            Ok(Some("start".to_string()))
+        });
+        assert!(created.unwrap());
+        assert_eq!(journal.len(), 1);
+
+        // Another process created the branch while our add failed: kept and named.
+        let err = journal_new_branch(tmp.path(), "theirs", &mut journal, || {
+            git(tmp.path(), &["branch", "theirs"]);
+            anyhow::bail!("branch already exists")
+        })
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("'theirs' now exists"),
+            "{err:#}"
+        );
+        assert_eq!(journal.len(), 1);
+    }
 }

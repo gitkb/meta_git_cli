@@ -28,10 +28,6 @@ fn main() {
         "Pull existing repos and clone any missing repos".to_string(),
     );
     adapted.insert(
-        "snapshot".to_string(),
-        "Save and restore workspace state across all repos".to_string(),
-    );
-    adapted.insert(
         "worktree".to_string(),
         "Create isolated worktree sets for multi-repo branches".to_string(),
     );
@@ -60,12 +56,6 @@ fn main() {
                 "git status".to_string(),
                 "git update".to_string(),
                 "git commit".to_string(),
-                "git snapshot".to_string(),
-                "git snapshot create".to_string(),
-                "git snapshot list".to_string(),
-                "git snapshot show".to_string(),
-                "git snapshot restore".to_string(),
-                "git snapshot delete".to_string(),
                 "git worktree".to_string(),
                 "git worktree create".to_string(),
                 "git worktree add".to_string(),
@@ -87,8 +77,6 @@ fn main() {
                     "meta git status".to_string(),
                     "meta git commit -m \"Update all repos\"".to_string(),
                     "meta git commit --edit              # Per-repo messages".to_string(),
-                    "meta git snapshot create before-refactor".to_string(),
-                    "meta git snapshot restore before-refactor".to_string(),
                     "meta git worktree create feature-x --repo api --repo web".to_string(),
                 ],
                 note: Some(

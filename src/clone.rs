@@ -190,6 +190,9 @@ pub(crate) fn execute_git_clone(
 
     // Use the queue-based cloning system
     clone_with_queue(Arc::clone(&queue), parallel, &mp, ssh_cmd.as_deref())?;
+    if let Some(error) = crate::clone_worker::report_failures(&queue) {
+        return Ok(CommandResult::Error(error));
+    }
 
     let (completed, total) = queue.get_counts();
     if total > initial_count {

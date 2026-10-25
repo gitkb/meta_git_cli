@@ -7,7 +7,6 @@ mod clone_worker;
 mod commit;
 mod git_env;
 mod helpers;
-mod snapshot;
 mod ssh;
 mod ssh_setup;
 mod status;
@@ -56,10 +55,6 @@ pub fn execute_command(
         return commands::worktree::execute_worktree_command(command, args, options, cwd);
     }
 
-    if command.starts_with("git snapshot") && help_requested {
-        return snapshot::execute_snapshot_command_help(command);
-    }
-
     if help_requested {
         if let Some(help) = build_passthrough_git_help(command, args, projects, cwd) {
             return CommandResult::Message(help);
@@ -69,25 +64,17 @@ pub fn execute_command(
 
     let result = match command {
         // These act on repos they find themselves, not on the selected ones
-        "git snapshot restore" | "git update" | "git clone"
+        "git update" | "git clone"
             if options.include_filters.is_some() || options.exclude_filters.is_some() =>
         {
             Err(anyhow::anyhow!(
-                "meta {command} finds its repos itself (in the snapshot or the .meta files); it does not take --include/--exclude"
+                "meta {command} finds its repos itself (in the .meta files); it does not take --include/--exclude"
             ))
         }
         "git status" => status::execute_git_status(projects, options, cwd),
         "git clone" => clone::execute_git_clone(args, options, cwd),
         "git update" => update::execute_git_update(projects, options.dry_run, cwd),
         "git commit" => commit::execute_git_commit(args, projects, options, cwd),
-        "git snapshot" => snapshot::execute_snapshot_help(),
-        "git snapshot create" => snapshot::execute_snapshot_create(args, projects, cwd),
-        "git snapshot list" => snapshot::execute_snapshot_list(cwd),
-        "git snapshot show" => snapshot::execute_snapshot_show(args, cwd),
-        "git snapshot restore" => {
-            snapshot::execute_snapshot_restore(args, projects, options.dry_run, cwd)
-        }
-        "git snapshot delete" => snapshot::execute_snapshot_delete(args, cwd),
         // Fallback: run raw git command across all repos
         _ => return execute_raw_git_command(command, args, projects, options, cwd),
     };
@@ -132,9 +119,7 @@ fn build_passthrough_git_help(
         return None;
     }
 
-    let adapted_commands = [
-        "clone", "status", "update", "commit", "snapshot", "worktree",
-    ];
+    let adapted_commands = ["clone", "status", "update", "commit", "worktree"];
     let git_args: Vec<String> = command_words
         .iter()
         .skip(1)
@@ -310,27 +295,6 @@ SPECIAL COMMANDS:
   meta git commit --edit
     Opens an editor to create different commit messages for each repo.
 
-SNAPSHOT COMMANDS (EXPERIMENTAL - file format subject to change):
-  Capture and restore workspace state for safe batch operations:
-
-  meta git snapshot create <name>
-    Record the current git state (SHA, branch, dirty status) of ALL repos.
-    Snapshots are recursive by default - they capture the entire workspace.
-
-  meta git snapshot list
-    List all available snapshots with creation date and repo count.
-
-  meta git snapshot show <name>
-    Display details of a snapshot including per-repo state.
-
-  meta git snapshot restore <name> [--force] [--dry-run]
-    Restore all repos to the recorded snapshot state. Prompts for confirmation.
-    Dirty repos are automatically stashed before restore.
-    Use --force to skip confirmation, --dry-run to preview changes.
-
-  meta git snapshot delete <name>
-    Delete a snapshot file.
-
 PASS-THROUGH COMMANDS:
   All other git commands are passed through to each repository:
 
@@ -355,8 +319,6 @@ Examples:
   meta git pull --tag backend
   meta git commit --edit
   meta git checkout -b feature/new --include-only api,frontend
-  meta git snapshot create before-upgrade
-  meta git snapshot restore before-upgrade
 "#
 }
 

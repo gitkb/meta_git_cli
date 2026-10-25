@@ -101,6 +101,36 @@ pub(crate) fn clone_with_queue(
     Ok(())
 }
 
+/// Print each failed clone with git's error to stderr, and return the
+/// command's error, or `None` when every clone succeeded.
+pub(crate) fn report_failures(queue: &CloneQueue) -> Option<String> {
+    let failures = queue.failures();
+    if failures.is_empty() {
+        return None;
+    }
+    for failure in &failures {
+        eprintln!(
+            "{} {} ({})",
+            style("Failed to clone").red().bold(),
+            failure.name,
+            failure.url
+        );
+        for line in failure.error.lines() {
+            eprintln!("    {line}");
+        }
+    }
+    let (finished, _) = queue.get_counts();
+    Some(format!(
+        "{} of {finished} repositories failed to clone: {}",
+        failures.len(),
+        failures
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
+}
+
 /// Clone a single repository and handle .meta discovery
 fn clone_single_repo(
     task: &CloneTask,
@@ -144,21 +174,16 @@ fn clone_single_repo(
         .spawn()
     {
         Ok(mut child) => {
-            // Stream stderr for progress updates
-            let stderr = child.stderr.take();
+            // Stream stderr for progress updates, and keep its last lines for
+            // the failure report (the progress bar is hidden off a terminal).
             let pb_clone = pb.clone();
             let task_name = task.name.clone();
-            if let Some(stderr) = stderr {
-                std::thread::spawn(move || {
-                    use std::io::{BufRead, BufReader};
-                    let reader = BufReader::new(stderr);
-                    for line in reader.lines().map_while(Result::ok) {
-                        pb_clone.set_message(format!("{task_name}: {line}"));
-                    }
-                });
-            }
+            let tail = StderrTail::spawn(child.stderr.take(), move |line| {
+                pb_clone.set_message(format!("{task_name}: {line}"))
+            });
 
-            match child.wait() {
+            let status = child.wait();
+            match status {
                 Ok(status) if status.success() => {
                     // Check for nested .meta and report new discoveries
                     match queue.mark_completed(task) {
@@ -189,8 +214,21 @@ fn clone_single_repo(
                         }
                     }
                 }
-                _ => {
-                    queue.mark_failed(task);
+                Ok(status) => {
+                    let stderr_text = tail.text();
+                    let error = if stderr_text.trim().is_empty() {
+                        format!("git clone exited with {status}")
+                    } else {
+                        stderr_text
+                    };
+                    queue.mark_failed(task, error);
+                    pb.finish_with_message(format!(
+                        "{}",
+                        style(format!("Failed to clone {}", task.name)).red()
+                    ));
+                }
+                Err(e) => {
+                    queue.mark_failed(task, format!("Failed to wait for git: {e}"));
                     pb.finish_with_message(format!(
                         "{}",
                         style(format!("Failed to clone {}", task.name)).red()
@@ -198,12 +236,94 @@ fn clone_single_repo(
                 }
             }
         }
-        Err(_) => {
-            queue.mark_failed(task);
+        Err(e) => {
+            queue.mark_failed(task, format!("Failed to run git: {e}"));
             pb.finish_with_message(format!(
                 "{}",
                 style(format!("Failed to spawn git for {}", task.name)).red()
             ));
         }
+    }
+}
+
+/// The last lines a process writes to stderr, kept by a reader thread that
+/// drains the pipe and holds at most [`StderrTail::KEPT_LINES`].
+struct StderrTail {
+    lines: Arc<Mutex<std::collections::VecDeque<String>>>,
+    done: std::sync::mpsc::Receiver<()>,
+}
+
+impl StderrTail {
+    const KEPT_LINES: usize = 20;
+    const LINE_BYTES: u64 = 4096;
+
+    fn spawn(
+        stderr: Option<impl std::io::Read + Send + 'static>,
+        on_line: impl Fn(&str) + Send + 'static,
+    ) -> Self {
+        let lines = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+        let (done_tx, done) = std::sync::mpsc::channel();
+        if let Some(stderr) = stderr {
+            let kept = Arc::clone(&lines);
+            std::thread::spawn(move || {
+                use std::io::{BufRead, BufReader, Read};
+                let mut reader = BufReader::new(stderr);
+                let mut buf = Vec::new();
+                // Reads at most LINE_BYTES at a time, so one huge line can't
+                // grow memory; a longer line is kept in pieces.
+                while (&mut reader)
+                    .take(Self::LINE_BYTES)
+                    .read_until(b'\n', &mut buf)
+                    .is_ok_and(|n| n > 0)
+                {
+                    let line = String::from_utf8_lossy(&buf).trim_end().to_string();
+                    buf.clear();
+                    on_line(&line);
+                    let mut kept = kept.lock().unwrap_or_else(|e| e.into_inner());
+                    if kept.len() == Self::KEPT_LINES {
+                        kept.pop_front();
+                    }
+                    kept.push_back(line);
+                }
+                drop(done_tx);
+            });
+        }
+        Self { lines, done }
+    }
+
+    /// The kept lines. Waits briefly for the reader to finish, but not for a
+    /// background process (an ssh master, say) that still holds the pipe.
+    fn text(&self) -> String {
+        let _ = self.done.recv_timeout(Duration::from_secs(2));
+        let lines = self.lines.lock().unwrap_or_else(|e| e.into_inner());
+        Vec::from(lines.clone()).join("\n")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stderr_tail_drains_everything_and_keeps_only_the_last_lines() {
+        let output: String = (0..100_000).map(|i| format!("line {i}\n")).collect();
+        let seen = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&seen);
+        let tail = StderrTail::spawn(Some(std::io::Cursor::new(output)), move |_| {
+            counter.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let text = tail.text();
+        assert_eq!(seen.load(Ordering::SeqCst), 100_000);
+        assert_eq!(text.lines().count(), StderrTail::KEPT_LINES);
+        assert!(text.ends_with("line 99999"));
+    }
+
+    #[test]
+    fn stderr_tail_bounds_a_single_huge_line() {
+        let output = "x".repeat(10_000_000);
+        let tail = StderrTail::spawn(Some(std::io::Cursor::new(output)), |_| {});
+        let text = tail.text();
+        assert!(text.len() <= StderrTail::KEPT_LINES * (StderrTail::LINE_BYTES as usize + 1));
     }
 }

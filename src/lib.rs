@@ -85,10 +85,10 @@ pub fn execute_command(
 }
 
 /// Check if a git command accesses remote repositories
-fn is_remote_command(command: &str) -> bool {
+fn is_remote_command(argv: &[String]) -> bool {
     let remote_commands = ["push", "pull", "fetch", "clone", "ls-remote"];
-    let cmd_lower = command.to_lowercase();
-    remote_commands.iter().any(|rc| cmd_lower.contains(rc))
+    argv.get(1)
+        .is_some_and(|subcommand| remote_commands.contains(&subcommand.as_str()))
 }
 
 fn has_help_token(command: &str, args: &[String]) -> bool {
@@ -132,7 +132,10 @@ fn build_passthrough_git_help(
         return None;
     }
 
-    let display_command = format!("git {}", git_args.join(" "));
+    let git_argv: Vec<String> = std::iter::once("git".to_string())
+        .chain(git_args.iter().cloned())
+        .collect();
+    let display_command = loop_lib::display_command(&git_argv);
     let scope = match get_project_directories_with_fallback(projects, cwd) {
         Ok(dirs) => {
             if dirs.is_empty() {
@@ -189,13 +192,13 @@ fn execute_raw_git_command(
         Err(e) => return CommandResult::Error(format!("Failed to get project directories: {e}")),
     };
 
-    // Build the full git command string
-    // command is e.g. "git add ." and args contains any additional arguments
-    let full_cmd = if args.is_empty() {
-        command.to_string()
-    } else {
-        format!("{} {}", command, args.join(" "))
-    };
+    // The git argv: the command words (e.g. "git" or "git add") and the
+    // user's args exactly as given
+    let argv: Vec<String> = command
+        .split_whitespace()
+        .map(str::to_string)
+        .chain(args.iter().cloned())
+        .collect();
 
     // Set git-specific environment variables (pager, colors, prompts)
     let git_env = Some(git_env::git_env());
@@ -204,14 +207,14 @@ fn execute_raw_git_command(
         .into_iter()
         .map(|dir| PlannedCommand {
             dir,
-            cmd: full_cmd.clone(),
+            argv: argv.clone(),
             env: git_env.clone(),
         })
         .collect();
 
     // For remote commands running in parallel, establish SSH ControlMaster
     // connections and inject GIT_SSH_COMMAND into each planned command.
-    if options.parallel && is_remote_command(command) {
+    if options.parallel && is_remote_command(&argv) {
         let urls = ssh::discover_ssh_urls(cwd);
 
         // HTTPS-only workspaces don't need SSH multiplexing
@@ -341,6 +344,10 @@ Examples:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn argv(line: &str) -> Vec<String> {
+        line.split_whitespace().map(str::to_string).collect()
+    }
     use commit::parse_multi_commit_file;
     use helpers::get_project_directories;
     use meta_plugin_protocol::{ExecutionPlan, PlanResponse, PlannedCommand};
@@ -555,12 +562,12 @@ the only commit message
             commands: vec![
                 PlannedCommand {
                     dir: "./repo1".to_string(),
-                    cmd: "git status".to_string(),
+                    argv: argv("git status"),
                     env: None,
                 },
                 PlannedCommand {
                     dir: "./repo2".to_string(),
-                    cmd: "git status".to_string(),
+                    argv: argv("git status"),
                     env: None,
                 },
             ],
@@ -572,7 +579,7 @@ the only commit message
 
         let json = serde_json::to_string(&plan).unwrap();
         assert!(json.contains("\"dir\":\"./repo1\""));
-        assert!(json.contains("\"cmd\":\"git status\""));
+        assert!(json.contains(r#""argv":["git","status"]"#));
         assert!(json.contains("\"parallel\":false"));
     }
 
@@ -582,7 +589,7 @@ the only commit message
             pre_commands: vec![],
             commands: vec![PlannedCommand {
                 dir: ".".to_string(),
-                cmd: "ls".to_string(),
+                argv: argv("ls"),
                 env: None,
             }],
             post_commands: vec![],
@@ -602,13 +609,13 @@ the only commit message
     fn test_planned_command_serialization() {
         let cmd = PlannedCommand {
             dir: "/absolute/path".to_string(),
-            cmd: "git pull --rebase".to_string(),
+            argv: argv("git pull --rebase"),
             env: None,
         };
 
         let json = serde_json::to_string(&cmd).unwrap();
         assert!(json.contains("\"dir\":\"/absolute/path\""));
-        assert!(json.contains("\"cmd\":\"git pull --rebase\""));
+        assert!(json.contains(r#""argv":["git","pull","--rebase"]"#));
     }
 
     #[test]
@@ -618,7 +625,7 @@ the only commit message
                 pre_commands: vec![],
                 commands: vec![PlannedCommand {
                     dir: "project".to_string(),
-                    cmd: "make build".to_string(),
+                    argv: argv("make build"),
                     env: None,
                 }],
                 post_commands: vec![],
@@ -632,7 +639,7 @@ the only commit message
         assert!(json.contains("\"plan\":"));
         assert!(json.contains("\"commands\":"));
         assert!(json.contains("\"dir\":\"project\""));
-        assert!(json.contains("\"cmd\":\"make build\""));
+        assert!(json.contains(r#""argv":["make","build"]"#));
         assert!(json.contains("\"parallel\":true"));
     }
 
@@ -645,12 +652,12 @@ the only commit message
                 commands: vec![
                     PlannedCommand {
                         dir: "a".to_string(),
-                        cmd: "cmd1".to_string(),
+                        argv: argv("cmd1"),
                         env: None,
                     },
                     PlannedCommand {
                         dir: "b".to_string(),
-                        cmd: "cmd2".to_string(),
+                        argv: argv("cmd2"),
                         env: None,
                     },
                 ],
@@ -671,7 +678,7 @@ the only commit message
         let commands = plan.get("commands").unwrap().as_array().unwrap();
         assert_eq!(commands.len(), 2);
         assert_eq!(commands[0].get("dir").unwrap().as_str().unwrap(), "a");
-        assert_eq!(commands[0].get("cmd").unwrap().as_str().unwrap(), "cmd1");
+        assert_eq!(commands[0]["argv"], serde_json::json!(["cmd1"]));
         assert!(!plan.get("parallel").unwrap().as_bool().unwrap());
     }
 
@@ -694,26 +701,31 @@ the only commit message
     fn test_planned_command_with_special_chars() {
         let cmd = PlannedCommand {
             dir: "./path with spaces".to_string(),
-            cmd: "git commit -m \"feat: add feature\"".to_string(),
+            argv: vec![
+                "git".to_string(),
+                "commit".to_string(),
+                "-m".to_string(),
+                "feat: \"add\" feature".to_string(),
+            ],
             env: None,
         };
 
         let json = serde_json::to_string(&cmd).unwrap();
         // JSON should properly escape the string
         assert!(json.contains("path with spaces"));
-        assert!(json.contains("\\\"feat: add feature\\\""));
+        assert!(json.contains("\"feat: \\\"add\\\" feature\""));
     }
 
     #[test]
     fn test_planned_command_git_clone() {
         let cmd = PlannedCommand {
             dir: "/home/user/workspace".to_string(),
-            cmd: "git clone git@github.com:org/repo.git my-repo".to_string(),
+            argv: argv("git clone git@github.com:org/repo.git my-repo"),
             env: None,
         };
 
         let json = serde_json::to_string(&cmd).unwrap();
-        assert!(json.contains("git clone"));
+        assert!(json.contains(r#""git","clone""#));
         assert!(json.contains("git@github.com:org/repo.git"));
     }
 
@@ -722,7 +734,7 @@ the only commit message
         let commands: Vec<PlannedCommand> = (0..100)
             .map(|i| PlannedCommand {
                 dir: format!("./repo_{i}"),
-                cmd: "git status".to_string(),
+                argv: argv("git status"),
                 env: None,
             })
             .collect();
@@ -814,7 +826,7 @@ the only commit message
             .into_iter()
             .map(|dir| PlannedCommand {
                 dir,
-                cmd: "git status".to_string(),
+                argv: argv("git status"),
                 env: None,
             })
             .collect();
@@ -852,7 +864,7 @@ the only commit message
             .iter()
             .map(|(name, url)| PlannedCommand {
                 dir: cwd.to_string(),
-                cmd: format!("git clone {url} {name}"),
+                argv: argv(&format!("git clone {url} {name}")),
                 env: None,
             })
             .collect();
@@ -871,7 +883,7 @@ the only commit message
         let json = serde_json::to_string(&response).unwrap();
 
         // Verify clone commands are in the plan
-        assert!(json.contains("git clone"));
+        assert!(json.contains(r#""git","clone""#));
         assert!(json.contains("repo1"));
         assert!(json.contains("repo2"));
     }
@@ -880,44 +892,44 @@ the only commit message
 
     #[test]
     fn test_is_remote_command_push() {
-        assert!(super::is_remote_command("git push"));
-        assert!(super::is_remote_command("git push origin main"));
+        assert!(super::is_remote_command(&argv("git push")));
+        assert!(super::is_remote_command(&argv("git push origin main")));
     }
 
     #[test]
     fn test_is_remote_command_pull() {
-        assert!(super::is_remote_command("git pull"));
-        assert!(super::is_remote_command("git pull --rebase"));
+        assert!(super::is_remote_command(&argv("git pull")));
+        assert!(super::is_remote_command(&argv("git pull --rebase")));
     }
 
     #[test]
     fn test_is_remote_command_fetch() {
-        assert!(super::is_remote_command("git fetch"));
-        assert!(super::is_remote_command("git fetch --all"));
+        assert!(super::is_remote_command(&argv("git fetch")));
+        assert!(super::is_remote_command(&argv("git fetch --all")));
     }
 
     #[test]
     fn test_is_remote_command_clone() {
-        assert!(super::is_remote_command("git clone"));
-        assert!(super::is_remote_command(
+        assert!(super::is_remote_command(&argv("git clone")));
+        assert!(super::is_remote_command(&argv(
             "git clone https://github.com/org/repo.git"
-        ));
+        )));
     }
 
     #[test]
     fn test_is_remote_command_ls_remote() {
-        assert!(super::is_remote_command("git ls-remote"));
+        assert!(super::is_remote_command(&argv("git ls-remote")));
     }
 
     #[test]
     fn test_is_remote_command_local_commands() {
-        assert!(!super::is_remote_command("git status"));
-        assert!(!super::is_remote_command("git add ."));
-        assert!(!super::is_remote_command("git commit -m \"msg\""));
-        assert!(!super::is_remote_command("git log"));
-        assert!(!super::is_remote_command("git diff"));
-        assert!(!super::is_remote_command("git branch"));
-        assert!(!super::is_remote_command("git checkout main"));
+        assert!(!super::is_remote_command(&argv("git status")));
+        assert!(!super::is_remote_command(&argv("git add .")));
+        assert!(!super::is_remote_command(&argv("git commit -m \"msg\"")));
+        assert!(!super::is_remote_command(&argv("git log")));
+        assert!(!super::is_remote_command(&argv("git diff")));
+        assert!(!super::is_remote_command(&argv("git branch")));
+        assert!(!super::is_remote_command(&argv("git checkout main")));
     }
 
     #[test]
@@ -926,7 +938,7 @@ the only commit message
             pre_commands: vec![],
             commands: vec![PlannedCommand {
                 dir: ".".to_string(),
-                cmd: "git push".to_string(),
+                argv: argv("git push"),
                 env: None,
             }],
             post_commands: vec![],
@@ -951,7 +963,7 @@ the only commit message
             pre_commands: vec![],
             commands: vec![PlannedCommand {
                 dir: ".".to_string(),
-                cmd: "git status".to_string(),
+                argv: argv("git status"),
                 env: None,
             }],
             post_commands: vec![],

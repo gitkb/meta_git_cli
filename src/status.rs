@@ -19,7 +19,7 @@ pub(crate) fn execute_git_status(
         .into_iter()
         .map(|dir| PlannedCommand {
             dir,
-            cmd: "git status".to_string(),
+            argv: vec!["git".to_string(), "status".to_string()],
             env: git_env.clone(),
         })
         .collect();

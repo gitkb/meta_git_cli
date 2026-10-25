@@ -9,8 +9,8 @@ use meta_git_lib::worktree::helpers::*;
 use super::cli_types::{CreateArgs, DestroyArgs, ExecArgs};
 use crate::git_env;
 
-/// Runs in each of `repos` that `--include`/`--exclude` select (a repo's
-/// `.meta` name or its path from `wt_dir`), naming them by that path.
+/// Runs in each of `repos` that `--include`/`--exclude` select (by alias:
+/// its path from `wt_dir`), naming them by that path.
 fn build_loop_config(
     wt_dir: &Path,
     repos: &[WorktreeRepoInfo],
@@ -21,21 +21,14 @@ fn build_loop_config(
     json: bool,
 ) -> Result<loop_lib::LoopConfig> {
     let directories: Vec<String> = repos.iter().map(|r| r.path.display().to_string()).collect();
-    let directories = if include_filters.is_empty() && exclude_filters.is_empty() {
-        directories
-    } else {
-        let tree = find_meta_dir()
-            .and_then(|meta_dir| meta_core::config::walk_meta_tree(&meta_dir, None).ok())
-            .unwrap_or_default();
-        let names = repo_filter::repo_names(&[], &tree);
-        repo_filter::select(
-            &include_filters,
-            &exclude_filters,
-            &directories,
-            wt_dir,
-            &names,
-        )?
-    };
+    // A member sits at its alias, so its path in the set is its name
+    let directories = repo_filter::select(
+        &include_filters,
+        &exclude_filters,
+        &directories,
+        wt_dir,
+        &[],
+    )?;
     Ok(loop_lib::LoopConfig {
         directories,
         ignore: vec![],

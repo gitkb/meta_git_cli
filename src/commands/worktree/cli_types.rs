@@ -169,9 +169,8 @@ pub struct ExecArgs {
     /// Start from a specific commit-ish (ephemeral only)
     pub commit_ish: Option<String>,
 
-    /// Only run in these repos (comma-separated): each value is a repo's .meta
-    /// name or its whole path from the worktree root (. for the root), never
-    /// part of one
+    /// Only run in these repos (comma-separated): each value is a repo's alias,
+    /// its whole path in the set (. for the root), never part of one
     #[arg(long, value_delimiter = ',')]
     pub include: Vec<String>,
 

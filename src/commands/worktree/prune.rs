@@ -10,7 +10,7 @@ use meta_git_lib::worktree::helpers::{require_meta_dir, resolve_worktree_root};
 use meta_git_lib::worktree::hooks::fire_post_prune;
 use meta_git_lib::worktree::record::{self, SetRecord};
 use meta_git_lib::worktree::safety::{
-    check_worktree_removal, delete_checked_set, linked_worktree_admin_dir, linked_worktree_dirs,
+    check_worktree_removal, delete_checked_set, linked_worktree_dirs, member_record,
 };
 use meta_git_lib::worktree::types::*;
 
@@ -30,6 +30,8 @@ fn create_prune_entry(
         age_seconds,
     }
 }
+
+const ORPHANED_REPOS: &str = "orphaned (all source repos removed from project)";
 
 /// Check if a set is orphaned because `project` no longer has any of the
 /// repos its worktrees (`aliases`, their paths in the set) belong to.
@@ -74,7 +76,7 @@ fn check_repo_orphaned(
         .count();
 
     if missing_count > 0 && missing_count == aliases.len() {
-        Some("orphaned (all source repos removed from project)".to_string())
+        Some(ORPHANED_REPOS.to_string())
     } else {
         None
     }
@@ -98,14 +100,26 @@ fn is_missing(path: &Path) -> bool {
     matches!(path.symlink_metadata(), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
 }
 
-/// The sets meta created that prune can find from the current workspace,
-/// each with its record and the admin directories that hold one for it:
+/// Every record naming each set path, with the admin directory it is in.
+type Records = BTreeMap<PathBuf, Vec<(PathBuf, SetRecord)>>;
+
+/// The sets meta created that prune can find from the current workspace:
 /// the sets under the worktree root, and any other set with a record in a
 /// repository of the workspace (one under `META_WORKTREES`, or one whose
-/// directory is gone). There is no global list, so sets of other
-/// workspaces are not seen.
-fn find_sets(meta_dir: &Path) -> Result<BTreeMap<PathBuf, (SetRecord, BTreeSet<PathBuf>)>> {
+/// directory is gone). There is no global list, so sets recorded only in
+/// other workspaces' repositories are not seen. Records that can't be used
+/// are returned as kept entries.
+fn find_sets(meta_dir: &Path) -> Result<(Records, Vec<PruneEntry>)> {
     let mut found: Vec<(PathBuf, SetRecord)> = Vec::new();
+    let mut unusable: Vec<PruneEntry> = Vec::new();
+    let mut not_used = |name: String, path: &Path, e: anyhow::Error| {
+        unusable.push(create_prune_entry(
+            name,
+            path.display().to_string(),
+            format!("meta's record there can't be used: {e:#}"),
+            None,
+        ))
+    };
     let worktree_root = resolve_worktree_root(Some(meta_dir))?;
     // A root that can't be read is skipped: its sets are still found
     // through their repositories, and checked one by one
@@ -117,11 +131,12 @@ fn find_sets(meta_dir: &Path) -> Result<BTreeMap<PathBuf, (SetRecord, BTreeSet<P
         if !entry.file_type().is_ok_and(|t| t.is_dir()) {
             continue;
         }
+        let name = entry.file_name().to_string_lossy().into_owned();
         for member in discover_worktree_members(&entry.path()).unwrap_or_default() {
-            if let Ok(admin) = linked_worktree_admin_dir(&member.path) {
-                if let Ok(Some(record)) = record::read(&admin) {
-                    found.push((admin, record));
-                }
+            match member_record(&member.path) {
+                Ok(Some(found_here)) => found.push(found_here),
+                Ok(None) => {}
+                Err(e) => not_used(name.clone(), &member.path, e),
             }
         }
     }
@@ -147,24 +162,39 @@ fn find_sets(meta_dir: &Path) -> Result<BTreeMap<PathBuf, (SetRecord, BTreeSet<P
             },
             _ => continue,
         };
-        found.extend(record::in_repo(&git_dir));
+        for (admin, record) in record::in_repo(&git_dir) {
+            match record {
+                Ok(record) => found.push((admin, record)),
+                Err(e) => {
+                    let name = admin.file_name().map(|n| n.to_string_lossy().into_owned());
+                    not_used(name.unwrap_or_default(), &admin, e)
+                }
+            }
+        }
     }
-    let mut sets: BTreeMap<PathBuf, (SetRecord, BTreeSet<PathBuf>)> = BTreeMap::new();
+    let mut sets = Records::new();
+    let mut seen = BTreeSet::new();
     for (admin, record) in found {
-        sets.entry(record.set.clone())
-            .or_insert_with(|| (record, BTreeSet::new()))
-            .1
-            .insert(admin);
+        if seen.insert(admin.clone()) {
+            sets.entry(record.set.clone())
+                .or_default()
+                .push((admin, record));
+        }
     }
-    Ok(sets)
+    let mut paths = BTreeSet::new();
+    unusable.retain(|e| paths.insert(e.path.clone()));
+    Ok((sets, unusable))
 }
 
-/// The paths of the worktrees in `set`, from the set, as repo aliases.
-fn set_aliases(set: &Path) -> Vec<String> {
-    discover_worktree_members(set)
-        .unwrap_or_default()
+/// The paths of `members` from `set`, as repo aliases.
+fn aliases<'a>(set: &Path, members: impl IntoIterator<Item = &'a Path>) -> Vec<String> {
+    members
         .into_iter()
-        .map(|m| m.alias)
+        .map(|path| match path.strip_prefix(set) {
+            Ok(rel) if rel.as_os_str().is_empty() => ".".to_string(),
+            Ok(rel) => rel.to_string_lossy().into_owned(),
+            Err(_) => path.to_string_lossy().into_owned(),
+        })
         .collect()
 }
 
@@ -177,8 +207,8 @@ pub(crate) fn handle_prune(
     let dry_run = args.dry_run;
 
     let meta_dir = require_meta_dir()?;
-    let sets = find_sets(&meta_dir)?;
-    if sets.is_empty() {
+    let (sets, mut kept) = find_sets(&meta_dir)?;
+    if sets.is_empty() && kept.is_empty() {
         if json {
             println!(
                 "{}",
@@ -195,40 +225,46 @@ pub(crate) fn handle_prune(
     }
 
     let now = Utc::now().timestamp();
-    let mut to_remove: Vec<PruneEntry> = Vec::new();
+    let mut to_remove: Vec<(PruneEntry, SetRecord)> = Vec::new();
     let mut config_cache = std::collections::HashMap::new();
 
-    for (set, (record, _)) in &sets {
+    for (set, records) in &sets {
         let path_key = set.display().to_string();
-        let name = record.name();
+        let Some((_, found)) = records.first() else {
+            continue;
+        };
+        let name = found.name();
 
         // Check if path exists (orphaned detection)
         if is_missing(set) {
-            to_remove.push(create_prune_entry(
-                name,
-                path_key,
-                "orphaned (missing directory)",
-                None,
+            to_remove.push((
+                create_prune_entry(name, path_key, "orphaned (missing directory)", None),
+                found.clone(),
             ));
             continue;
         }
 
+        // The record the set's own worktrees hold decides, not an older one
+        // left in a repository; the removal check must see this one again
+        let members = discover_worktree_members(set).unwrap_or_default();
+        let record =
+            record::find(set, members.iter().map(|m| &m.path)).unwrap_or_else(|| found.clone());
+
         // Check if source project directory still exists
         if !record.project.exists() {
-            to_remove.push(create_prune_entry(
-                name,
-                path_key,
-                "orphaned (source project missing)",
-                None,
+            to_remove.push((
+                create_prune_entry(name, path_key, "orphaned (source project missing)", None),
+                record,
             ));
             continue;
         }
 
         // Check if source repos still exist in project (with config caching)
+        let found_aliases = aliases(set, members.iter().map(|m| m.path.as_path()));
         if let Some(reason) =
-            check_repo_orphaned(&record.project, &set_aliases(set), &mut config_cache)
+            check_repo_orphaned(&record.project, &found_aliases, &mut config_cache)
         {
-            to_remove.push(create_prune_entry(name, path_key, reason, None));
+            to_remove.push((create_prune_entry(name, path_key, reason, None), record));
             continue;
         }
 
@@ -238,16 +274,18 @@ pub(crate) fn handle_prune(
                 // Total age = configured TTL + seconds past expiry
                 let overdue = remaining.unsigned_abs();
                 let age = record.ttl_seconds.unwrap_or(0).saturating_add(overdue);
-                to_remove.push(create_prune_entry(name, path_key, "ttl_expired", Some(age)));
+                to_remove.push((
+                    create_prune_entry(name, path_key, "ttl_expired", Some(age)),
+                    record,
+                ));
             }
         }
     }
 
     // Prune never discards work: a candidate whose directory holds anything
     // that deleting it would lose is kept, with the reason.
-    let mut kept = Vec::new();
     let mut candidates = Vec::new();
-    for entry in to_remove {
+    for (entry, record) in to_remove {
         let wt_path = Path::new(&entry.path);
         if is_missing(wt_path) {
             candidates.push((entry, None));
@@ -264,9 +302,18 @@ pub(crate) fn handle_prune(
         }
         // A set holding another set is blocked by the check.
         let problems = match check_worktree_removal(wt_path) {
-            Ok(check) if check.is_clear() && check.record().is_some() => {
-                candidates.push((entry, Some(check)));
+            Ok(check) if check.is_clear() && check.record() == Some(&record) => {
+                // Only the full scan finds repos nested in other repos
+                let all = aliases(wt_path, check.members.iter().map(|m| m.path.as_path()));
+                let still_orphaned = entry.reason != ORPHANED_REPOS
+                    || check_repo_orphaned(&record.project, &all, &mut config_cache).is_some();
+                if still_orphaned {
+                    candidates.push((entry, Some(check)));
+                }
                 continue;
+            }
+            Ok(check) if check.is_clear() && check.record().is_some() => {
+                "its record changed after prune read it".to_string()
             }
             Ok(check) if check.is_clear() => "meta's record of it is gone".to_string(),
             Ok(check) => [check.blockers, check.unsaved].concat().join("; "),
@@ -390,16 +437,12 @@ pub(crate) fn handle_prune(
     warn_kept(&kept, strict)
 }
 
-/// Delete the records of a set whose directory is gone, the ones that still
-/// name it. Git's own entries for its worktrees stay, for `git worktree prune`.
-fn forget(set: &Path, sets: &BTreeMap<PathBuf, (SetRecord, BTreeSet<PathBuf>)>) -> Result<()> {
-    for admin in sets
-        .get(set)
-        .map(|(_, admins)| admins)
-        .into_iter()
-        .flatten()
-    {
-        if record::read(admin)?.is_some_and(|r| r.set == set) {
+/// Delete the records of a set whose directory is gone, each only if it is
+/// still the record prune read. Git's own entries for its worktrees stay,
+/// for `git worktree prune`.
+fn forget(set: &Path, sets: &Records) -> Result<()> {
+    for (admin, record) in sets.get(set).into_iter().flatten() {
+        if record::read(admin)?.as_ref() == Some(record) {
             record::delete(admin)?;
         }
     }

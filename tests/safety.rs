@@ -266,6 +266,8 @@ fn remove_checks_repos_nested_in_other_repos() {
     );
 }
 
+// A read-only directory needs Unix permissions.
+#[cfg(unix)]
 #[test]
 fn prune_keeps_worktrees_that_hold_work() {
     let temp = tempfile::tempdir().unwrap();
@@ -296,8 +298,9 @@ fn prune_keeps_worktrees_that_hold_work() {
     );
     assert!(out.status.success(), "{}", stderr(&out));
     fs::write(ws.join(".worktrees/expired/a/README"), "edited").unwrap();
-    // Expired clean ones are pruned, unless removing one fails.
-    for name in ["clean", "locked"] {
+    // Expired clean ones are pruned, unless git has one locked (kept) or
+    // removing one fails.
+    for name in ["clean", "locked", "stuck"] {
         let out = worktree(
             root,
             &ws,
@@ -310,6 +313,13 @@ fn prune_keeps_worktrees_that_hold_work() {
         &ws.join("a"),
         &["worktree", "lock", locked.to_str().unwrap()],
     );
+    // git can't delete the files of a checkout whose directory is read-only
+    let stuck = ws.join(".worktrees/stuck/a");
+    let mode = |m| {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&stuck, fs::Permissions::from_mode(m)).unwrap()
+    };
+    mode(0o555);
 
     let out = meta_git(
         root,
@@ -318,9 +328,10 @@ fn prune_keeps_worktrees_that_hold_work() {
         &[],
         json!({"json_output": true}),
     );
+    mode(0o755);
     assert!(!out.status.success());
     assert!(
-        stderr(&out).contains("Failed to prune: locked"),
+        stderr(&out).contains("Failed to prune: stuck"),
         "{}",
         stderr(&out)
     );
@@ -336,7 +347,8 @@ fn prune_keeps_worktrees_that_hold_work() {
         names
     };
     assert_eq!(names("removed"), ["clean"]);
-    assert_eq!(names("kept"), ["expired", "locked"]);
+    assert_eq!(names("kept"), ["expired", "locked", "stuck"]);
+    assert!(report.to_string().contains("git has it locked"), "{report}");
     assert!(locked.exists());
     assert!(ws.join(".worktrees/rootonly/NOTES.md").exists());
     assert!(ws.join(".worktrees/expired/a/README").exists());
@@ -862,4 +874,78 @@ fn records_live_beside_git_and_no_store_is_written() {
     );
     let report: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(report["removed"], json!([]), "{report}");
+}
+
+#[test]
+fn prune_keeps_and_reports_a_record_it_cannot_read() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let ws = workspace(root, &["a"]);
+    let out = worktree(root, &ws, &["create", "t", "--repo", "a", "--no-deps"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    fs::write(ws.join("a/.git/worktrees/a/meta-worktree.json"), "not json").unwrap();
+
+    let out = meta_git(
+        root,
+        &ws,
+        "git worktree prune",
+        &[],
+        json!({"json_output": true}),
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let reason = report["kept"][0]["reason"].as_str().unwrap_or_default();
+    assert!(reason.contains("can't be used"), "{report}");
+    let out = meta_git(
+        root,
+        &ws,
+        "git worktree prune",
+        &[],
+        json!({"strict": true}),
+    );
+    assert!(!out.status.success(), "strict prune fails on a kept set");
+
+    let out = worktree(root, &ws, &["remove", "t", "--force"]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("can't be used"), "{}", stderr(&out));
+    assert!(ws.join(".worktrees/t/a/README").exists());
+}
+
+#[test]
+fn a_stale_record_does_not_expire_a_set_made_again_at_its_path() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let ws = workspace(root, &["a", "b"]);
+    let elsewhere = root.join("elsewhere");
+    let create = |repo: &str, ttl: &[&str]| {
+        let args = [&["t", "--repo", repo, "--no-deps"][..], ttl].concat();
+        meta_git_in(
+            root,
+            &ws,
+            "git worktree create",
+            &args,
+            json!({}),
+            Some(&elsewhere),
+        )
+    };
+    // A set with a TTL that has run out, deleted by hand: its record stays
+    // in a's git dir
+    let out = create("a", &["--ttl", "0"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    fs::remove_dir_all(elsewhere.join("t")).unwrap();
+    // The same path made again, from b, with no TTL
+    let out = create("b", &[]);
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    let out = meta_git(
+        root,
+        &ws,
+        "git worktree prune",
+        &[],
+        json!({"json_output": true}),
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["removed"], json!([]), "{report}");
+    assert!(elsewhere.join("t/b/README").exists());
 }

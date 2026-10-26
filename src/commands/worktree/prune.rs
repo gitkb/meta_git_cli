@@ -41,11 +41,14 @@ fn check_repo_orphaned(
         .entry(entry.project.clone())
         .or_insert_with(|| {
             let project_path = Path::new(&entry.project);
-            meta_core::config::find_meta_config_in(project_path).and_then(|(meta_path, _)| {
-                meta_core::config::parse_meta_config(&meta_path)
-                    .ok()
-                    .map(|(projects, _)| projects)
-            })
+            meta_core::config::find_meta_config_in(project_path)
+                .ok()
+                .flatten()
+                .and_then(|(meta_path, _)| {
+                    meta_core::config::parse_meta_config(&meta_path)
+                        .ok()
+                        .map(|(projects, _)| projects)
+                })
         });
 
     let Some(projects) = config else {

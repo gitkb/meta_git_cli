@@ -63,6 +63,18 @@ fn workspace(root: &Path, projects: &[&str]) -> std::path::PathBuf {
 
 /// Invoke the plugin protocol in `cwd` with an isolated store under `root/data`.
 fn meta_git(root: &Path, cwd: &Path, command: &str, args: &[&str], options: Value) -> Output {
+    meta_git_in(root, cwd, command, args, options, None)
+}
+
+/// [`meta_git`], with `META_WORKTREES` set to `worktrees` if given.
+fn meta_git_in(
+    root: &Path,
+    cwd: &Path,
+    command: &str,
+    args: &[&str],
+    options: Value,
+    worktrees: Option<&Path>,
+) -> Output {
     let request = json!({"command": command, "args": args, "cwd": cwd, "options": options});
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_meta-git"));
     if root.join("bin").is_dir() {
@@ -75,6 +87,7 @@ fn meta_git(root: &Path, cwd: &Path, command: &str, args: &[&str], options: Valu
         .current_dir(cwd)
         .env("META_DATA_DIR", root.join("data"))
         .env_remove("META_WORKTREES")
+        .envs(worktrees.map(|dir| ("META_WORKTREES", dir)))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -127,6 +140,30 @@ fn remove_refuses_directories_meta_did_not_create() {
     assert!(!out.status.success());
     assert!(
         stderr(&out).contains("Invalid worktrees_dir"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(ws.join("a/README").exists());
+
+    // META_WORKTREES may point anywhere, the workspace root included: there
+    // the primary clone `a` looks like a set, and the forged record would
+    // remove it. The removal check refuses a primary checkout.
+    fs::write(
+        ws.join(".meta"),
+        json!({"projects": {"a": "unused"}}).to_string(),
+    )
+    .unwrap();
+    let out = meta_git_in(
+        root,
+        &ws,
+        "git worktree remove",
+        &["a", "--force"],
+        json!({}),
+        Some(&ws),
+    );
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("not a linked worktree"),
         "{}",
         stderr(&out)
     );

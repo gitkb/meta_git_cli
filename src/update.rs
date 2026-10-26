@@ -21,17 +21,19 @@ pub(crate) fn execute_git_update(
     // Build list of directories to check for .meta files
     let dirs_to_check: Vec<PathBuf> = if recursive {
         // In recursive mode, check each directory that has a .meta file
-        projects
-            .iter()
-            .map(|p| {
-                if p == "." {
-                    cwd.to_path_buf()
-                } else {
-                    cwd.join(p)
-                }
-            })
-            .filter(|path| config::find_meta_config_in(path).is_some())
-            .collect()
+        // A .meta that can't be examined is an error, not "no nested repos"
+        let mut dirs = Vec::new();
+        for p in projects {
+            let path = if p == "." {
+                cwd.to_path_buf()
+            } else {
+                cwd.join(p)
+            };
+            if config::find_meta_config_in(&path)?.is_some() {
+                dirs.push(path);
+            }
+        }
+        dirs
     } else {
         // Normal mode - just check current directory
         vec![cwd.to_path_buf()]
@@ -44,7 +46,7 @@ pub(crate) fn execute_git_update(
 
     // First pass: check for orphaned repos and warn user
     for dir in &dirs_to_check {
-        let Some((meta_path, _format)) = config::find_meta_config_in(dir) else {
+        let Some((meta_path, _format)) = config::find_meta_config_in(dir)? else {
             continue;
         };
 

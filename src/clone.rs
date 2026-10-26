@@ -143,7 +143,7 @@ pub(crate) fn execute_git_clone(
 
     // Parse meta config inside cloned repo
     let clone_dir_path = cwd.join(&clone_dir);
-    if config::find_meta_config_in(&clone_dir_path).is_none() {
+    if config::find_meta_config_in(&clone_dir_path)?.is_none() {
         return Ok(CommandResult::Message(
             "No .meta config found in cloned repository".to_string(),
         ));

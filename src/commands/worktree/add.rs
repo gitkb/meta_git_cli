@@ -125,12 +125,7 @@ pub(crate) fn handle_add(args: AddArgs, verbose: bool, json: bool) -> Result<()>
                 break;
             }
         };
-        added.push(CreateRepoEntry {
-            alias: spec.alias.clone(),
-            path: dest.display().to_string(),
-            branch,
-            created_branch,
-        });
+        // A worktree that can't be recorded is reported as failed, not added
         if let Some(set_record) = &set_record {
             if let Err(e) =
                 linked_worktree_admin_dir(&dest).and_then(|admin| record::write(&admin, set_record))
@@ -142,6 +137,12 @@ pub(crate) fn handle_add(args: AddArgs, verbose: bool, json: bool) -> Result<()>
                 break;
             }
         }
+        added.push(CreateRepoEntry {
+            alias: spec.alias.clone(),
+            path: dest.display().to_string(),
+            branch,
+            created_branch,
+        });
     }
 
     if json {

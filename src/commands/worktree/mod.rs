@@ -105,8 +105,11 @@ pub fn execute_worktree_command(
                     CommandResult::Message(String::new())
                 }
                 _ => {
-                    // Actual parse errors
-                    CommandResult::ShowHelp(Some(e.to_string()))
+                    // Actual parse errors: clap's message names the problem
+                    // and where to get help; the whole git help would bury it
+                    let message = e.to_string();
+                    let message = message.strip_prefix("error: ").unwrap_or(&message);
+                    CommandResult::Error(message.trim_end().to_string())
                 }
             }
         }

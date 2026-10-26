@@ -4,7 +4,7 @@ use colored::*;
 use meta_core::display::escape;
 use std::path::Path;
 
-use meta_git_lib::worktree::helpers::{find_meta_dir, lookup_nested_project};
+use meta_git_lib::worktree::helpers::find_meta_dir;
 use meta_git_lib::worktree::hooks::fire_post_prune;
 use meta_git_lib::worktree::safety::{check_worktree_removal, delete_checked_set};
 use meta_git_lib::worktree::store::{entry_ttl_remaining, store_list, store_remove_batch};
@@ -62,8 +62,7 @@ fn check_repo_orphaned(
         .filter(|alias| {
             *alias != "."
                 && !projects.iter().any(|p| p.name == *alias)
-                && !(alias.contains('/')
-                    && lookup_nested_project(Path::new(&entry.project), alias).is_ok())
+                && !(alias.contains('/') && nested_alias_present(Path::new(&entry.project), alias))
         })
         .count();
 
@@ -71,6 +70,17 @@ fn check_repo_orphaned(
         Some("orphaned (all source repos removed from project)".to_string())
     } else {
         None
+    }
+}
+
+/// Whether nested alias `alias` still names a repo of `project`. A nested
+/// config that can't be read or is refused says nothing about the repo, so
+/// it counts as present: only a tree that reads cleanly without the alias
+/// makes the repo removed.
+fn nested_alias_present(project: &Path, alias: &str) -> bool {
+    match meta_core::config::walk_meta_tree(project, None) {
+        Ok(tree) => meta_core::config::build_project_map(&tree, project, "").contains_key(alias),
+        Err(_) => true,
     }
 }
 

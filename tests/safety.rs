@@ -752,7 +752,14 @@ fn prune_keeps_a_worktree_it_cannot_inspect() {
     assert!(out.status.success(), "{}", stderr(&out));
     let report: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(report["removed"], json!([]), "{report}");
-    assert_eq!(report["kept"][0]["name"], "x", "{report}");
+    let kept: Vec<&str> = report["kept"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|e| e["name"].as_str())
+        .collect();
+    // The set, found through its repository, and the root it couldn't list
+    assert_eq!(kept, [".worktrees", "x"], "{report}");
     assert!(ws.join(".worktrees/x/a/README").exists());
 }
 
@@ -948,4 +955,55 @@ fn a_stale_record_does_not_expire_a_set_made_again_at_its_path() {
     let report: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(report["removed"], json!([]), "{report}");
     assert!(elsewhere.join("t/b/README").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn prune_reports_a_repository_whose_worktrees_it_cannot_list() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let ws = workspace(root, &["a"]);
+    let elsewhere = root.join("elsewhere");
+    let out = meta_git_in(
+        root,
+        &ws,
+        "git worktree create",
+        &["t", "--repo", "a", "--no-deps", "--ttl", "0"],
+        json!({}),
+        Some(&elsewhere),
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    let admins = ws.join("a/.git/worktrees");
+    let mode = |m| fs::set_permissions(&admins, fs::Permissions::from_mode(m)).unwrap();
+    mode(0o000);
+    if fs::read_dir(&admins).is_ok() {
+        // Running as root: permissions don't apply.
+        mode(0o755);
+        return;
+    }
+    let out = meta_git(
+        root,
+        &ws,
+        "git worktree prune",
+        &[],
+        json!({"json_output": true}),
+    );
+    let strict = meta_git(
+        root,
+        &ws,
+        "git worktree prune",
+        &[],
+        json!({"strict": true}),
+    );
+    mode(0o755);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["kept"][0]["name"], "worktrees", "{report}");
+    assert!(
+        !strict.status.success(),
+        "strict prune fails when it can't see every set"
+    );
+    assert!(elsewhere.join("t/a/README").exists());
 }

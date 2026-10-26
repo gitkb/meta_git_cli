@@ -31,8 +31,6 @@ fn create_prune_entry(
     }
 }
 
-const ORPHANED_REPOS: &str = "orphaned (all source repos removed from project)";
-
 /// Check if a set is orphaned because `project` no longer has any of the
 /// repos its worktrees (`aliases`, their paths in the set) belong to.
 /// Uses a config cache to avoid redundant file I/O when multiple worktrees
@@ -76,7 +74,7 @@ fn check_repo_orphaned(
         .count();
 
     if missing_count > 0 && missing_count == aliases.len() {
-        Some(ORPHANED_REPOS.to_string())
+        Some("orphaned (all source repos removed from project)".to_string())
     } else {
         None
     }
@@ -116,18 +114,29 @@ fn find_sets(meta_dir: &Path) -> Result<(Records, Vec<PruneEntry>)> {
         unusable.push(create_prune_entry(
             name,
             path.display().to_string(),
-            format!("meta's record there can't be used: {e:#}"),
+            format!("meta's records there can't be used: {e:#}"),
             None,
         ))
     };
     let worktree_root = resolve_worktree_root(Some(meta_dir))?;
-    // A root that can't be read is skipped: its sets are still found
+    // A root that can't be read is reported; its sets are still found
     // through their repositories, and checked one by one
-    for entry in std::fs::read_dir(&worktree_root)
-        .into_iter()
-        .flatten()
-        .flatten()
-    {
+    let entries = match std::fs::read_dir(&worktree_root) {
+        Ok(entries) => entries.collect(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => vec![Err(e)],
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) => {
+                let name = worktree_root
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned());
+                not_used(name.unwrap_or_default(), &worktree_root, e.into());
+                continue;
+            }
+        };
         if !entry.file_type().is_ok_and(|t| t.is_dir()) {
             continue;
         }
@@ -184,6 +193,36 @@ fn find_sets(meta_dir: &Path) -> Result<(Records, Vec<PruneEntry>)> {
     let mut paths = BTreeSet::new();
     unusable.retain(|e| paths.insert(e.path.clone()));
     Ok((sets, unusable))
+}
+
+/// Why an existing set with `record`, whose worktrees are at `aliases` in
+/// it, is due for pruning, if it is: the reason and, for an expired TTL,
+/// its age.
+fn eligible(
+    record: &SetRecord,
+    aliases: &[String],
+    config_cache: &mut std::collections::HashMap<
+        PathBuf,
+        Option<Vec<meta_core::config::ProjectInfo>>,
+    >,
+    now: i64,
+) -> Option<(String, Option<u64>)> {
+    // Check if source project directory still exists
+    if !record.project.exists() {
+        return Some(("orphaned (source project missing)".to_string(), None));
+    }
+    // Check if source repos still exist in project (with config caching)
+    if let Some(reason) = check_repo_orphaned(&record.project, aliases, config_cache) {
+        return Some((reason, None));
+    }
+    // Check TTL expiration
+    let remaining = record.ttl_remaining(now).filter(|r| *r <= 0)?;
+    // Total age = configured TTL + seconds past expiry
+    let age = record
+        .ttl_seconds
+        .unwrap_or(0)
+        .saturating_add(remaining.unsigned_abs());
+    Some(("ttl_expired".to_string(), Some(age)))
 }
 
 /// The paths of `members` from `set`, as repo aliases.
@@ -250,35 +289,9 @@ pub(crate) fn handle_prune(
         let record =
             record::find(set, members.iter().map(|m| &m.path)).unwrap_or_else(|| found.clone());
 
-        // Check if source project directory still exists
-        if !record.project.exists() {
-            to_remove.push((
-                create_prune_entry(name, path_key, "orphaned (source project missing)", None),
-                record,
-            ));
-            continue;
-        }
-
-        // Check if source repos still exist in project (with config caching)
         let found_aliases = aliases(set, members.iter().map(|m| m.path.as_path()));
-        if let Some(reason) =
-            check_repo_orphaned(&record.project, &found_aliases, &mut config_cache)
-        {
-            to_remove.push((create_prune_entry(name, path_key, reason, None), record));
-            continue;
-        }
-
-        // Check TTL expiration
-        if let Some(remaining) = record.ttl_remaining(now) {
-            if remaining <= 0 {
-                // Total age = configured TTL + seconds past expiry
-                let overdue = remaining.unsigned_abs();
-                let age = record.ttl_seconds.unwrap_or(0).saturating_add(overdue);
-                to_remove.push((
-                    create_prune_entry(name, path_key, "ttl_expired", Some(age)),
-                    record,
-                ));
-            }
+        if let Some((reason, age)) = eligible(&record, &found_aliases, &mut config_cache, now) {
+            to_remove.push((create_prune_entry(name, path_key, reason, age), record));
         }
     }
 
@@ -303,11 +316,11 @@ pub(crate) fn handle_prune(
         // A set holding another set is blocked by the check.
         let problems = match check_worktree_removal(wt_path) {
             Ok(check) if check.is_clear() && check.record() == Some(&record) => {
-                // Only the full scan finds repos nested in other repos
+                // Judged again with every repo the full scan found: only it
+                // finds repos nested in other repos
                 let all = aliases(wt_path, check.members.iter().map(|m| m.path.as_path()));
-                let still_orphaned = entry.reason != ORPHANED_REPOS
-                    || check_repo_orphaned(&record.project, &all, &mut config_cache).is_some();
-                if still_orphaned {
+                if let Some((reason, age)) = eligible(&record, &all, &mut config_cache, now) {
+                    let entry = create_prune_entry(entry.name, entry.path, reason, age);
                     candidates.push((entry, Some(check)));
                 }
                 continue;

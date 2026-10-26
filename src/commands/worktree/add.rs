@@ -35,12 +35,22 @@ pub(crate) fn handle_add(args: AddArgs, verbose: bool, json: bool) -> Result<()>
     // Check existing repos in the worktree
     let existing = discover_worktree_repos(&wt_dir)?;
 
+    // A repo given twice can't be added twice: refuse before adding anything,
+    // or the first add would be left out of the store
+    for (i, spec) in repo_specs.iter().enumerate() {
+        if repo_specs.iter().take(i).any(|o| o.alias == spec.alias) {
+            anyhow::bail!("Repo '{}' is given twice", escape(&spec.alias));
+        }
+        if existing.iter().any(|r| r.alias == spec.alias) {
+            anyhow::bail!(
+                "Repo '{}' already exists in worktree '{name}'",
+                escape(&spec.alias)
+            );
+        }
+    }
+
     let mut added = Vec::new();
     for spec in repo_specs {
-        if existing.iter().any(|r| r.alias == spec.alias) {
-            anyhow::bail!("Repo '{}' already exists in worktree '{name}'", spec.alias);
-        }
-
         // Use recursive lookup for nested paths (containing '/')
         let (source, _project) = lookup_nested_project(&meta_dir, &spec.alias)?;
 

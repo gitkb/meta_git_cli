@@ -111,8 +111,12 @@ pub(crate) fn clone_with_queue(
     // command must not report success
     let errors = nested_errors.lock().unwrap_or_else(|e| e.into_inner());
     if !errors.is_empty() {
+        // Failed clones are reported too, not hidden behind this error
+        let failed = report_failures(&queue)
+            .map(|summary| format!("\n{summary}"))
+            .unwrap_or_default();
         anyhow::bail!(
-            "Could not read nested .meta configs:\n{}",
+            "Could not read nested .meta configs:\n{}{failed}",
             errors.join("\n")
         );
     }

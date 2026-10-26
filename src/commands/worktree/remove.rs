@@ -72,9 +72,10 @@ pub(crate) fn handle_remove(args: DestroyArgs, verbose: bool, json: bool) -> Res
     // Remove from centralized store
     // By the key read before deleting: the deleted path can't be resolved again.
     let record = [(record_key, record.created_at)];
-    store_remove_batch(&record).with_context(|| {
+    // A failure is reported after the hook and output: the worktree is gone
+    let stored = store_remove_batch(&record).with_context(|| {
         format!("Removed worktree '{name}', but could not update the worktree store")
-    })?;
+    });
 
     // Fire post-destroy hook
     fire_post_destroy(name, &wt_dir, force, meta_dir.as_deref());
@@ -89,5 +90,5 @@ pub(crate) fn handle_remove(args: DestroyArgs, verbose: bool, json: bool) -> Res
     } else {
         println!("{} Removed worktree '{}'", "✓".green(), name.bold());
     }
-    Ok(())
+    stored
 }

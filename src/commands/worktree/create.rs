@@ -67,6 +67,27 @@ pub(crate) fn handle_create(
     if repo_specs.is_empty() && !use_all {
         anyhow::bail!("Specify repos with --repo <alias> or use --all");
     }
+    // A repeated --repo is one worktree; two branches for it cannot both be
+    // checked out there, and keeping one would drop the other unnoticed.
+    // (Two aliases of one repo are caught again once resolved.)
+    for (i, spec) in repo_specs.iter().enumerate() {
+        let other = repo_specs
+            .iter()
+            .skip(i + 1)
+            .find(|o| o.alias == spec.alias && o.branch != spec.branch);
+        if let Some(other) = other {
+            let branch = |s: &meta_git_lib::worktree::RepoSpec| {
+                escape(s.branch.as_deref().unwrap_or("(default)")).into_owned()
+            };
+            anyhow::bail!(
+                "Repo '{}' is given twice, on branches '{}' and '{}'",
+                escape(&spec.alias),
+                branch(spec),
+                branch(other)
+            );
+        }
+    }
+
     let nearest_meta_dir = require_meta_dir()?;
     let meta_dir = if recursive {
         meta_core::config::find_root_meta_dir(&nearest_meta_dir)

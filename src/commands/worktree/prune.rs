@@ -297,8 +297,9 @@ pub(crate) fn handle_prune(
             Some((e.path.clone(), entry.created_at.clone()))
         })
         .collect();
-    store_remove_batch(&records)
-        .context("Pruned worktrees, but could not update the worktree store")?;
+    // A failure is reported after the hook and output: the sets are gone
+    let stored = store_remove_batch(&records)
+        .context("Pruned worktrees, but could not update the worktree store");
 
     // Fire post-prune hook
     let meta_dir = find_meta_dir();
@@ -326,6 +327,7 @@ pub(crate) fn handle_prune(
         print_kept(&kept);
     }
 
+    stored?;
     if !failed.is_empty() {
         anyhow::bail!("Failed to prune: {}", escape(&failed.join(", ")));
     }

@@ -25,7 +25,7 @@ pub enum WorktreeCommands {
     Diff(DiffArgs),
     /// Run a command across worktree repos
     Exec(ExecArgs),
-    /// Remove expired/orphaned worktrees
+    /// Remove expired/orphaned worktree sets of this workspace
     Prune(PruneArgs),
     #[command(external_subcommand)]
     Unknown(Vec<String>),

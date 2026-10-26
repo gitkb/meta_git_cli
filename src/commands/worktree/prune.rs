@@ -1,7 +1,7 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::Utc;
 use colored::*;
-use meta_core::display::escape;
+use meta_core::display::{escape, escape_path};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -10,7 +10,7 @@ use meta_git_lib::worktree::helpers::{require_meta_dir, resolve_worktree_root};
 use meta_git_lib::worktree::hooks::fire_post_prune;
 use meta_git_lib::worktree::record::{self, SetRecord};
 use meta_git_lib::worktree::safety::{
-    check_worktree_removal, delete_checked_set, linked_worktree_dirs, member_record,
+    check_worktree_removal, delete_checked_set, linked_worktree_admin_dir, member_record,
 };
 use meta_git_lib::worktree::types::*;
 
@@ -145,7 +145,11 @@ fn find_sets(meta_dir: &Path) -> Result<(Records, Vec<PruneEntry>)> {
             match member_record(&member.path) {
                 Ok(Some(found_here)) => found.push(found_here),
                 Ok(None) => {}
-                Err(e) => not_used(name.clone(), &member.path, e),
+                // Named by its admin directory, as the repository scan names it
+                Err(e) => {
+                    let admin = linked_worktree_admin_dir(&member.path).unwrap_or(member.path);
+                    not_used(name.clone(), &admin, e)
+                }
             }
         }
     }
@@ -164,13 +168,14 @@ fn find_sets(meta_dir: &Path) -> Result<(Records, Vec<PruneEntry>)> {
         }
     }
     for repo in repos {
-        let git_dir = match repo.join(".git").symlink_metadata() {
-            Ok(meta) if meta.is_dir() => repo.join(".git"),
-            Ok(meta) if meta.is_file() => match linked_worktree_dirs(&repo) {
-                Ok((_, common)) => common,
-                Err(_) => continue,
-            },
-            _ => continue,
+        let git_dir = match repo_git_dir(&repo) {
+            Ok(Some(git_dir)) => git_dir,
+            Ok(None) => continue,
+            Err(e) => {
+                let name = repo.file_name().map(|n| n.to_string_lossy().into_owned());
+                not_used(name.unwrap_or_default(), &repo, e);
+                continue;
+            }
         };
         for (admin, record) in record::in_repo(&git_dir) {
             match record {
@@ -226,13 +231,52 @@ fn eligible(
     Some(("ttl_expired".to_string(), Some(age)))
 }
 
-/// The paths of `members` from `set`, as repo aliases.
+/// The git directory holding the worktrees of the repository checked out at
+/// `repo`: `None` if there is no repository there (not cloned).
+fn repo_git_dir(repo: &Path) -> Result<Option<PathBuf>> {
+    let dot_git = repo.join(".git");
+    let meta = match dot_git.symlink_metadata() {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(
+                anyhow::Error::from(e).context(format!("Cannot inspect {}", escape_path(&dot_git)))
+            )
+        }
+    };
+    if meta.is_dir() {
+        return Ok(Some(dot_git));
+    }
+    // A `.git` file: a linked worktree's (its admin directory names the
+    // repository's git directory in `commondir`) or a `--separate-git-dir`
+    // checkout's (it names the git directory itself)
+    let content = std::fs::read_to_string(&dot_git)
+        .with_context(|| format!("Cannot read {}", escape_path(&dot_git)))?;
+    let target = content
+        .trim()
+        .strip_prefix("gitdir:")
+        .map(|target| repo.join(target.trim()))
+        .with_context(|| format!("{} has no gitdir line", escape_path(&dot_git)))?;
+    Ok(Some(
+        match std::fs::read_to_string(target.join("commondir")) {
+            Ok(common) => target.join(common.trim()),
+            Err(_) => target,
+        },
+    ))
+}
+
+/// The paths of `members` from `set`, as repo aliases (`/`-separated, as
+/// in `.meta`, on every platform).
 fn aliases<'a>(set: &Path, members: impl IntoIterator<Item = &'a Path>) -> Vec<String> {
     members
         .into_iter()
         .map(|path| match path.strip_prefix(set) {
             Ok(rel) if rel.as_os_str().is_empty() => ".".to_string(),
-            Ok(rel) => rel.to_string_lossy().into_owned(),
+            Ok(rel) => rel
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/"),
             Err(_) => path.to_string_lossy().into_owned(),
         })
         .collect()
@@ -275,8 +319,15 @@ pub(crate) fn handle_prune(
         };
         let name = found.name();
 
-        // Check if path exists (orphaned detection)
+        // Check if path exists (orphaned detection). Records whose worktree
+        // is still checked out (a set moved elsewhere) are left alone.
         if is_missing(set) {
+            if !records
+                .iter()
+                .any(|(admin, _)| record::checkout_gone(admin))
+            {
+                continue;
+            }
             to_remove.push((
                 create_prune_entry(name, path_key, "orphaned (missing directory)", None),
                 found.clone(),
@@ -287,8 +338,21 @@ pub(crate) fn handle_prune(
         // The record the set's own worktrees hold decides, not an older one
         // left in a repository; the removal check must see this one again
         let members = discover_worktree_members(set).unwrap_or_default();
-        let record =
-            record::find(set, members.iter().map(|m| &m.path)).unwrap_or_else(|| found.clone());
+        let record = match record::find(set, members.iter().map(|m| &m.path)) {
+            Some(record) => record,
+            // None of its worktrees holds a record (or prune can't read
+            // them). Records left by worktrees that are gone are git's to
+            // prune; any other stands, and the check decides, as it does
+            // for a path that now leads through a link.
+            None if is_plain_dir(set)
+                && records
+                    .iter()
+                    .all(|(admin, _)| record::checkout_gone(admin)) =>
+            {
+                continue
+            }
+            None => found.clone(),
+        };
 
         let found_aliases = aliases(set, members.iter().map(|m| m.path.as_path()));
         if let Some((reason, age)) = eligible(&record, &found_aliases, &mut config_cache, now) {
@@ -451,16 +515,21 @@ pub(crate) fn handle_prune(
     warn_kept(&kept, strict)
 }
 
-/// Delete the records of a set whose directory is gone, each only if it is
-/// still the record prune read. Git's own entries for its worktrees stay,
-/// for `git worktree prune`.
+/// Delete the records of a set whose directory is gone, each only if its
+/// worktree is gone too and it is still the record prune read. Git's own
+/// entries for its worktrees stay, for `git worktree prune`.
 fn forget(set: &Path, sets: &Records) -> Result<()> {
     for (admin, record) in sets.get(set).into_iter().flatten() {
-        if record::read(admin)?.as_ref() == Some(record) {
+        if record::checkout_gone(admin) && record::read(admin)?.as_ref() == Some(record) {
             record::delete(admin)?;
         }
     }
     Ok(())
+}
+
+/// Whether `path` is a directory reached without following any link.
+fn is_plain_dir(path: &Path) -> bool {
+    path.symlink_metadata().is_ok_and(|m| m.is_dir()) && path_moved(path).is_none()
 }
 
 /// Why the recorded path no longer resolves to itself, if it doesn't: a
@@ -516,6 +585,16 @@ mod tests {
             .map(|(alias, _)| alias.to_string())
             .collect();
         (PathBuf::from(project), aliases)
+    }
+
+    #[test]
+    fn aliases_use_slashes_on_every_platform() {
+        let set = Path::new("set");
+        let members = [set.to_path_buf(), set.join("group").join("core")];
+        assert_eq!(
+            aliases(set, members.iter().map(PathBuf::as_path)),
+            [".", "group/core"]
+        );
     }
 
     // ── create_prune_entry ──────────────────────────────

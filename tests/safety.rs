@@ -673,10 +673,6 @@ fn prune_leaves_a_dangling_link_at_a_set_path() {
     // Replace the set with a link to storage that has since disappeared.
     let set = ws.join(".worktrees/gone");
     let check = std::fs::canonicalize(&set).unwrap();
-    git(
-        &ws.join("a"),
-        &["worktree", "remove", set.join("a").to_str().unwrap()],
-    );
     fs::remove_dir_all(&set).unwrap();
     std::os::unix::fs::symlink(root.join("vanished"), &set).unwrap();
     assert_eq!(check, ws.canonicalize().unwrap().join(".worktrees/gone"));
@@ -689,11 +685,12 @@ fn prune_leaves_a_dangling_link_at_a_set_path() {
         json!({"json_output": true}),
     );
     assert!(out.status.success(), "{}", stderr(&out));
-    // git deleted the set's records with its worktree, so nothing names the
-    // link as a set, and prune leaves it alone
+    // The record still names the path, but prune neither follows the link
+    // nor takes the link for a missing set: it deletes and forgets nothing
     let report: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(report["removed"], json!([]), "{report}");
     assert!(set.symlink_metadata().is_ok());
+    assert!(ws.join("a/.git/worktrees/a/meta-worktree.json").exists());
 }
 
 #[cfg(unix)]
@@ -1052,4 +1049,129 @@ fn prune_reports_repositories_it_could_not_search() {
         "strict prune fails when it can't see every set"
     );
     assert!(elsewhere.join("t/a/README").exists());
+}
+
+#[test]
+fn prune_finds_sets_of_a_separate_git_dir_repository() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let ws = workspace(root, &[]);
+    git(
+        &ws,
+        &[
+            "init",
+            "-q",
+            "--separate-git-dir",
+            root.join("sep.git").to_str().unwrap(),
+            "s",
+        ],
+    );
+    git(
+        &ws.join("s"),
+        &["commit", "-q", "--allow-empty", "-m", "init"],
+    );
+    fs::write(
+        ws.join(".meta"),
+        json!({"projects": {"s": "unused"}}).to_string(),
+    )
+    .unwrap();
+    let elsewhere = root.join("elsewhere");
+    let out = meta_git_in(
+        root,
+        &ws,
+        "git worktree create",
+        &["t", "--repo", "s", "--no-deps", "--ttl", "0"],
+        json!({}),
+        Some(&elsewhere),
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    let out = meta_git(
+        root,
+        &ws,
+        "git worktree prune",
+        &[],
+        json!({"json_output": true}),
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["removed"][0]["name"], "t", "{report}");
+    assert!(!elsewhere.join("t").exists());
+}
+
+#[test]
+fn prune_leaves_a_moved_set_and_stale_records_alone() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let ws = workspace(root, &["a", "b"]);
+    let elsewhere = root.join("elsewhere");
+    let create = |name: &str, repo: &str| {
+        let args = [name, "--repo", repo, "--no-deps", "--ttl", "0"];
+        meta_git_in(
+            root,
+            &ws,
+            "git worktree create",
+            &args,
+            json!({}),
+            Some(&elsewhere),
+        )
+    };
+    // A set moved after it was made, as ATC moves the sets it stages
+    let out = create("staged", "a");
+    assert!(out.status.success(), "{}", stderr(&out));
+    fs::rename(elsewhere.join("staged"), elsewhere.join("installed")).unwrap();
+    git(
+        &ws.join("a"),
+        &[
+            "worktree",
+            "repair",
+            elsewhere.join("installed/a").to_str().unwrap(),
+        ],
+    );
+    // A set deleted by hand, and the path reused for a worktree made with git
+    let out = create("reused", "b");
+    assert!(out.status.success(), "{}", stderr(&out));
+    fs::remove_dir_all(elsewhere.join("reused")).unwrap();
+    fs::create_dir(elsewhere.join("reused")).unwrap();
+    git(
+        &ws.join("a"),
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "byhand",
+            "../../elsewhere/reused/a",
+        ],
+    );
+
+    let out = meta_git(
+        root,
+        &ws,
+        "git worktree prune",
+        &[],
+        json!({"strict": true, "json_output": true}),
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["removed"], json!([]), "{report}");
+    assert_eq!(report["kept"], json!([]), "{report}");
+    // The moved set keeps its record, and says why remove refuses it
+    assert!(elsewhere.join("installed/a/README").exists());
+    assert!(ws.join("a/.git/worktrees/a/meta-worktree.json").exists());
+    let out = meta_git_in(
+        root,
+        &ws,
+        "git worktree remove",
+        &["installed"],
+        json!({}),
+        Some(&elsewhere),
+    );
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("was the set moved?"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(elsewhere.join("reused/a/README").exists());
 }

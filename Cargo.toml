@@ -21,7 +21,7 @@ meta_git_lib = { path = "../meta_git_lib" }
 meta_cli = { path = "../meta_cli", package = "meta" }
 loop_lib = { path = "../loop_lib" }
 clap = { version = "4.3", features = ["derive"] }
-thiserror = "1.0"
+thiserror = "2.0"
 anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 rayon = "1.7"

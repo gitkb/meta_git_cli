@@ -8,7 +8,7 @@ use std::path::Path;
 /// pass them directly to `establish_ssh_masters` without information loss.
 /// Returns an empty list if no .meta config is found or no SSH URLs exist.
 pub fn discover_ssh_urls(cwd: &Path) -> Vec<String> {
-    let Some((config_path, _format)) = meta_core::config::find_meta_config(cwd, None) else {
+    let Ok(Some((config_path, _format))) = meta_core::config::find_meta_config(cwd, None) else {
         return vec![];
     };
 
@@ -38,7 +38,7 @@ pub(crate) struct RemoteMismatch {
 /// Check child repos for remote URL mismatches against .meta config.
 /// Returns a list of mismatches found (non-interactive, no prompts).
 pub(crate) fn find_remote_mismatches(cwd: &Path) -> Vec<RemoteMismatch> {
-    let Some((config_path, _format)) = meta_core::config::find_meta_config(cwd, None) else {
+    let Ok(Some((config_path, _format))) = meta_core::config::find_meta_config(cwd, None) else {
         return vec![];
     };
 

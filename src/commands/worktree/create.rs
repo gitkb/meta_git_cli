@@ -91,7 +91,7 @@ pub(crate) fn handle_create(
 
     let nearest_meta_dir = require_meta_dir()?;
     let meta_dir = if recursive {
-        meta_core::config::find_root_meta_dir(&nearest_meta_dir)
+        meta_core::config::find_root_meta_dir(&nearest_meta_dir)?
     } else {
         nearest_meta_dir
     };

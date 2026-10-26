@@ -128,14 +128,16 @@ pub(crate) fn handle_add(args: AddArgs, verbose: bool, json: bool) -> Result<()>
         });
     }
 
-    // Update centralized store
-    let new_repos: Vec<StoreRepoEntry> = added.iter().map(StoreRepoEntry::from).collect();
-    store_extend_repos(&wt_dir, new_repos).with_context(|| {
-        format!("Added repos to worktree '{name}', but could not update the worktree store")
-    })?;
-    if let Some(e) = failed {
-        return Err(e);
-    }
+    // Record what was added (if anything), then report it, then any error:
+    // a failed add and a failed store write are both shown
+    let stored = if added.is_empty() {
+        Ok(())
+    } else {
+        let new_repos: Vec<StoreRepoEntry> = added.iter().map(StoreRepoEntry::from).collect();
+        store_extend_repos(&wt_dir, new_repos).with_context(|| {
+            format!("Added repos to worktree '{name}', but could not update the worktree store")
+        })
+    };
 
     if json {
         let output = AddOutput {
@@ -157,5 +159,9 @@ pub(crate) fn handle_add(args: AddArgs, verbose: bool, json: bool) -> Result<()>
         }
     }
 
-    Ok(())
+    match (failed, stored) {
+        (Some(e), Err(store)) => Err(e.context(format!("{store:#}"))),
+        (Some(e), Ok(())) => Err(e),
+        (None, stored) => stored,
+    }
 }

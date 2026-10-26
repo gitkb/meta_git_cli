@@ -342,9 +342,16 @@ pub(crate) fn handle_prune(
         print_kept(&kept);
     }
 
-    stored?;
+    // Every failure is reported, the store's and the sets' alike
+    let mut problems = Vec::new();
+    if let Err(e) = stored {
+        problems.push(format!("{e:#}"));
+    }
     if !failed.is_empty() {
-        anyhow::bail!("Failed to prune: {}", escape(&failed.join(", ")));
+        problems.push(format!("Failed to prune: {}", escape(&failed.join(", "))));
+    }
+    if !problems.is_empty() {
+        anyhow::bail!("{}", problems.join("\n"));
     }
     warn_kept(&kept, strict)
 }

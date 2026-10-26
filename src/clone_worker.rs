@@ -244,8 +244,12 @@ fn clone_single_repo(
                         Err(e) => {
                             pb.finish_with_message(format!(
                                 "{}",
-                                style(format!("Cloned {} (meta parse error: {})", task.name, e))
-                                    .yellow()
+                                style(format!(
+                                    "Cloned {} (meta parse error: {})",
+                                    task.name,
+                                    meta_core::display::escape_lines(&format!("{e:#}"))
+                                ))
+                                .yellow()
                             ));
                             record(e);
                         }

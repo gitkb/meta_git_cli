@@ -748,6 +748,23 @@ the only commit message
     }
 
     #[test]
+    fn test_get_project_directories_refuses_a_bad_meta_file() {
+        // A refused config is an error, not "just the root"
+        let temp_dir = TempDir::new().unwrap();
+        std::fs::write(
+            temp_dir.path().join(".meta"),
+            r#"{"projects": {"evil": {"repo": "u", "path": "../../x"}}}"#,
+        )
+        .unwrap();
+
+        let err = get_project_directories(temp_dir.path()).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("must not contain '..'"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
     fn test_get_project_directories_with_meta_file() {
         let temp_dir = TempDir::new().unwrap();
 

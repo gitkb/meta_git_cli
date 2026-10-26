@@ -186,11 +186,11 @@ pub(crate) fn handle_prune(
             candidates.push((entry, None));
             continue;
         }
-        if leads_elsewhere(wt_path) {
+        if let Some(why) = path_moved(wt_path) {
             kept.push(create_prune_entry(
                 entry.name,
                 entry.path,
-                format!("{}, but {LEADS_ELSEWHERE}", entry.reason),
+                format!("{}, but {why}", entry.reason),
                 entry.age_seconds,
             ));
             continue;
@@ -261,16 +261,18 @@ pub(crate) fn handle_prune(
         let wt_path = Path::new(&prune_entry.path);
         let removal = match &check {
             // Checked again: a directory above may have become a link since
-            Some(_) if leads_elsewhere(wt_path) => {
-                kept.push(create_prune_entry(
-                    prune_entry.name,
-                    prune_entry.path,
-                    format!("{}, but {LEADS_ELSEWHERE}", prune_entry.reason),
-                    prune_entry.age_seconds,
-                ));
-                continue;
-            }
-            Some(check) => delete_checked_set(wt_path, check, false, false),
+            Some(check) => match path_moved(wt_path) {
+                None => delete_checked_set(wt_path, check, false, false),
+                Some(why) => {
+                    kept.push(create_prune_entry(
+                        prune_entry.name,
+                        prune_entry.path,
+                        format!("{}, but {why}", prune_entry.reason),
+                        prune_entry.age_seconds,
+                    ));
+                    continue;
+                }
+            },
             // A missing directory only loses its record. One that has
             // reappeared since was never checked: keep it, nothing failed.
             None if !is_missing(wt_path) => {
@@ -344,18 +346,19 @@ pub(crate) fn handle_prune(
     warn_kept(&kept, strict)
 }
 
-const LEADS_ELSEWHERE: &str = "a directory above it now leads elsewhere through a symlink";
-
-/// Whether the recorded path no longer resolves to itself because a
-/// directory above it became a symlink, which could lead into another set.
+/// Why the recorded path no longer resolves to itself, if it doesn't: a
+/// directory above it became a symlink, which could lead into another set,
+/// or it can't be resolved at all.
 /// The store records each set's resolved path when it is created. A link at
 /// the set directory itself is left to the removal check, which refuses it.
-fn leads_elsewhere(path: &Path) -> bool {
+fn path_moved(path: &Path) -> Option<String> {
     match path.symlink_metadata() {
-        Ok(meta) if !meta.file_type().is_symlink() => {
-            path.canonicalize().ok().as_deref() != Some(path)
-        }
-        _ => false,
+        Ok(meta) if !meta.file_type().is_symlink() => match path.canonicalize() {
+            Ok(resolved) if resolved == path => None,
+            Ok(_) => Some("a directory above it now leads elsewhere through a symlink".to_string()),
+            Err(e) => Some(format!("its path cannot be resolved ({e})")),
+        },
+        _ => None,
     }
 }
 

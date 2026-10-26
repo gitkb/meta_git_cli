@@ -428,14 +428,20 @@ fn journal_new_branch(
 
 /// Undo a failed create: delete the set this call claimed, if the removal
 /// check finds nothing to lose, and the branches it created, if they still
-/// point where it left them. Returns the error to report.
+/// point where it left them. A record that can't be used (one whose write
+/// failed, say) doesn't stop it: this call made the set, so it needs no
+/// proof of that. Returns the error to report.
 fn roll_back(
     wt_dir: &std::path::Path,
     new_branches: &[(std::path::PathBuf, String, String)],
     error: anyhow::Error,
 ) -> anyhow::Error {
     let undone = check_worktree_removal(wt_dir).and_then(|check| {
-        let problems = [check.blockers.clone(), check.unsaved.clone()].concat();
+        let blockers = check
+            .blockers
+            .iter()
+            .filter(|b| !check.unusable_records.contains(b));
+        let problems: Vec<String> = blockers.chain(&check.unsaved).cloned().collect();
         anyhow::ensure!(problems.is_empty(), "{}", problems.join("; "));
         delete_checked_set(wt_dir, &check, false, false)
     });

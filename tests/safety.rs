@@ -123,6 +123,11 @@ fn remove_refuses_directories_meta_did_not_create() {
     let out = worktree(root, &ws, &["remove", "notawt", "--force"]);
     assert!(!out.status.success());
     assert!(stderr(&out).contains("no record"), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("holds no worktrees"),
+        "{}",
+        stderr(&out)
+    );
     assert!(ws.join(".worktrees/notawt/data").exists());
 
     // A worktree made with git, not meta, carries no record of meta making it.
@@ -140,6 +145,11 @@ fn remove_refuses_directories_meta_did_not_create() {
     let out = worktree(root, &ws, &["remove", "byhand", "--force"]);
     assert!(!out.status.success());
     assert!(stderr(&out).contains("no record"), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("git worktree remove"),
+        "{}",
+        stderr(&out)
+    );
     assert!(ws.join(".worktrees/byhand/README").exists());
 
     // worktrees_dir "." would make the primary clone `a` look like a worktree.
@@ -1174,4 +1184,147 @@ fn prune_leaves_a_moved_set_and_stale_records_alone() {
         stderr(&out)
     );
     assert!(elsewhere.join("reused/a/README").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn prune_reports_a_linked_checkout_whose_git_metadata_it_cannot_read() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let ws = workspace(root, &[]);
+    // Project `a` is itself a linked worktree of a repository elsewhere
+    let url = root.join("up/a.git");
+    upstream(&url);
+    git(root, &["clone", "-q", url.to_str().unwrap(), "main-a"]);
+    git(
+        &root.join("main-a"),
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "ws-a",
+            ws.join("a").to_str().unwrap(),
+        ],
+    );
+    fs::write(
+        ws.join(".meta"),
+        json!({"projects": {"a": "unused"}}).to_string(),
+    )
+    .unwrap();
+    let elsewhere = root.join("elsewhere");
+    let out = meta_git_in(
+        root,
+        &ws,
+        "git worktree create",
+        &["t", "--repo", "a", "--no-deps", "--ttl", "0"],
+        json!({}),
+        Some(&elsewhere),
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    let commondir = root.join("main-a/.git/worktrees/a/commondir");
+    let mode = |m| fs::set_permissions(&commondir, fs::Permissions::from_mode(m)).unwrap();
+    mode(0o000);
+    if fs::read_to_string(&commondir).is_ok() {
+        // Running as root: permissions don't apply.
+        mode(0o644);
+        return;
+    }
+    let out = meta_git(
+        root,
+        &ws,
+        "git worktree prune",
+        &[],
+        json!({"json_output": true}),
+    );
+    let strict = meta_git(
+        root,
+        &ws,
+        "git worktree prune",
+        &[],
+        json!({"strict": true}),
+    );
+    mode(0o644);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["kept"][0]["name"], "a", "{report}");
+    assert!(
+        !strict.status.success(),
+        "strict prune fails when it can't see every set"
+    );
+    assert!(elsewhere.join("t/a/README").exists());
+}
+
+#[test]
+fn prune_finds_sets_of_a_bare_repository() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let ws = workspace(root, &[]);
+    let url = root.join("up/b.git");
+    upstream(&url);
+    git(&ws, &["clone", "-q", "--bare", url.to_str().unwrap(), "b"]);
+    fs::write(
+        ws.join(".meta"),
+        json!({"projects": {"b": "unused"}}).to_string(),
+    )
+    .unwrap();
+    let elsewhere = root.join("elsewhere");
+    let out = meta_git_in(
+        root,
+        &ws,
+        "git worktree create",
+        &["t", "--repo", "b", "--no-deps", "--ttl", "0"],
+        json!({}),
+        Some(&elsewhere),
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    let out = meta_git(
+        root,
+        &ws,
+        "git worktree prune",
+        &[],
+        json!({"json_output": true}),
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["removed"][0]["name"], "t", "{report}");
+    assert!(!elsewhere.join("t").exists());
+}
+
+#[test]
+fn prune_leaves_a_gone_set_alone_while_one_of_its_worktrees_lives_on() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let ws = workspace(root, &["a", "b"]);
+    let args = ["create", "t", "--repo", "a", "--repo", "b", "--no-deps"];
+    let out = worktree(root, &ws, &args);
+    assert!(out.status.success(), "{}", stderr(&out));
+    // One worktree moved out of the set, then the set deleted by hand
+    let moved = root.join("moved-a");
+    git(
+        &ws.join("a"),
+        &[
+            "worktree",
+            "move",
+            ws.join(".worktrees/t/a").to_str().unwrap(),
+            moved.to_str().unwrap(),
+        ],
+    );
+    fs::remove_dir_all(ws.join(".worktrees/t")).unwrap();
+
+    let out = meta_git(
+        root,
+        &ws,
+        "git worktree prune",
+        &[],
+        json!({"json_output": true}),
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["removed"], json!([]), "{report}");
+    assert!(ws.join("a/.git/worktrees/a/meta-worktree.json").exists());
+    assert!(moved.join("README").exists());
 }

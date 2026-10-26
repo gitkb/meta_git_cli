@@ -33,10 +33,15 @@ pub(crate) fn handle_remove(args: DestroyArgs, verbose: bool, json: bool) -> Res
     // Only delete what meta created: it records each worktree it makes.
     if check.record().is_none() {
         anyhow::bail!(
-            "Refusing to remove {}: meta has no record of creating a worktree set there.\n\
-             If it was made by hand or by an older meta (which kept its records elsewhere), \
-             run 'git worktree remove' for each worktree in it, then delete it.",
-            escape_path(&wt_dir)
+            "Refusing to remove {}: meta has no record of creating a worktree set there.\n{}",
+            escape_path(&wt_dir),
+            if check.members.is_empty() {
+                "It holds no worktrees (any it had are gone, and their records with them); \
+                 delete it yourself if you don't need what is left in it."
+            } else {
+                "If it was made by hand or by an older meta (which kept its records elsewhere), \
+                 run 'git worktree remove' for each worktree in it, then delete it."
+            }
         );
     }
     if !check.unsaved.is_empty() {

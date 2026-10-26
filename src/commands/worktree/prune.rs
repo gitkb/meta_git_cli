@@ -231,13 +231,19 @@ fn eligible(
     Some(("ttl_expired".to_string(), Some(age)))
 }
 
-/// The git directory holding the worktrees of the repository checked out at
-/// `repo`: `None` if there is no repository there (not cloned).
+/// The git directory holding the worktrees of the repository at `repo`:
+/// `None` if there is no repository there (not cloned).
 fn repo_git_dir(repo: &Path) -> Result<Option<PathBuf>> {
     let dot_git = repo.join(".git");
     let meta = match dot_git.symlink_metadata() {
         Ok(meta) => meta,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        // A bare repository is its own git directory
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let bare = repo.join("HEAD").is_file()
+                && repo.join("objects").is_dir()
+                && repo.join("refs").is_dir();
+            return Ok(bare.then(|| repo.to_path_buf()));
+        }
         Err(e) => {
             return Err(
                 anyhow::Error::from(e).context(format!("Cannot inspect {}", escape_path(&dot_git)))
@@ -249,7 +255,7 @@ fn repo_git_dir(repo: &Path) -> Result<Option<PathBuf>> {
     }
     // A `.git` file: a linked worktree's (its admin directory names the
     // repository's git directory in `commondir`) or a `--separate-git-dir`
-    // checkout's (it names the git directory itself)
+    // checkout's (it names the git directory itself, with no `commondir`)
     let content = std::fs::read_to_string(&dot_git)
         .with_context(|| format!("Cannot read {}", escape_path(&dot_git)))?;
     let target = content
@@ -257,12 +263,14 @@ fn repo_git_dir(repo: &Path) -> Result<Option<PathBuf>> {
         .strip_prefix("gitdir:")
         .map(|target| repo.join(target.trim()))
         .with_context(|| format!("{} has no gitdir line", escape_path(&dot_git)))?;
-    Ok(Some(
-        match std::fs::read_to_string(target.join("commondir")) {
-            Ok(common) => target.join(common.trim()),
-            Err(_) => target,
-        },
-    ))
+    let commondir = target.join("commondir");
+    match std::fs::read_to_string(&commondir) {
+        Ok(common) => Ok(Some(target.join(common.trim()))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Some(target)),
+        Err(e) => {
+            Err(anyhow::Error::from(e).context(format!("Cannot read {}", escape_path(&commondir))))
+        }
+    }
 }
 
 /// The paths of `members` from `set`, as repo aliases (`/`-separated, as
@@ -319,12 +327,12 @@ pub(crate) fn handle_prune(
         };
         let name = found.name();
 
-        // Check if path exists (orphaned detection). Records whose worktree
-        // is still checked out (a set moved elsewhere) are left alone.
+        // Check if path exists (orphaned detection). A set with a worktree
+        // still checked out (moved elsewhere) is left alone.
         if is_missing(set) {
             if !records
                 .iter()
-                .any(|(admin, _)| record::checkout_gone(admin))
+                .all(|(admin, _)| record::checkout_gone(admin))
             {
                 continue;
             }
@@ -516,7 +524,7 @@ pub(crate) fn handle_prune(
 }
 
 /// Delete the records of a set whose directory is gone, each only if its
-/// worktree is gone too and it is still the record prune read. Git's own
+/// worktree is still gone and it is still the record prune read. Git's own
 /// entries for its worktrees stay, for `git worktree prune`.
 fn forget(set: &Path, sets: &Records) -> Result<()> {
     for (admin, record) in sets.get(set).into_iter().flatten() {

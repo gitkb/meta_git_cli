@@ -902,7 +902,7 @@ fn prune_keeps_and_reports_a_record_it_cannot_read() {
     assert!(out.status.success(), "{}", stderr(&out));
     let report: Value = serde_json::from_slice(&out.stdout).unwrap();
     let reason = report["kept"][0]["reason"].as_str().unwrap_or_default();
-    assert!(reason.contains("can't be used"), "{report}");
+    assert!(reason.contains("can't be read"), "{report}");
     let out = meta_git(
         root,
         &ws,
@@ -1001,6 +1001,52 @@ fn prune_reports_a_repository_whose_worktrees_it_cannot_list() {
     assert!(out.status.success(), "{}", stderr(&out));
     let report: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(report["kept"][0]["name"], "worktrees", "{report}");
+    assert!(
+        !strict.status.success(),
+        "strict prune fails when it can't see every set"
+    );
+    assert!(elsewhere.join("t/a/README").exists());
+}
+
+#[test]
+fn prune_reports_repositories_it_could_not_search() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let ws = workspace(root, &["a"]);
+    let elsewhere = root.join("elsewhere");
+    let out = meta_git_in(
+        root,
+        &ws,
+        "git worktree create",
+        &["t", "--repo", "a", "--no-deps", "--ttl", "0"],
+        json!({}),
+        Some(&elsewhere),
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    // A nested meta project whose config can't be parsed stops the walk
+    // over the workspace's repositories
+    let config = json!({"projects": {"a": "unused", "g": {"repo": "unused", "meta": true}}});
+    fs::write(ws.join(".meta"), config.to_string()).unwrap();
+    fs::create_dir(ws.join("g")).unwrap();
+    fs::write(ws.join("g/.meta"), "not json").unwrap();
+
+    let out = meta_git(
+        root,
+        &ws,
+        "git worktree prune",
+        &[],
+        json!({"json_output": true}),
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["kept"][0]["name"], "ws", "{report}");
+    let strict = meta_git(
+        root,
+        &ws,
+        "git worktree prune",
+        &[],
+        json!({"strict": true}),
+    );
     assert!(
         !strict.status.success(),
         "strict prune fails when it can't see every set"

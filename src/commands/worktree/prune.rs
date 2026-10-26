@@ -1,7 +1,7 @@
 use anyhow::Result;
 use chrono::Utc;
 use colored::*;
-use meta_core::display::{escape, escape_lines};
+use meta_core::display::escape;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -114,7 +114,7 @@ fn find_sets(meta_dir: &Path) -> Result<(Records, Vec<PruneEntry>)> {
         unusable.push(create_prune_entry(
             name,
             path.display().to_string(),
-            format!("meta's records there can't be used: {e:#}"),
+            format!("meta's records there can't be read: {e:#}"),
             None,
         ))
     };
@@ -157,10 +157,11 @@ fn find_sets(meta_dir: &Path) -> Result<(Records, Vec<PruneEntry>)> {
                 .into_values()
                 .map(|(path, _)| path),
         ),
-        Err(e) => eprintln!(
-            "warning: only some repositories were searched for worktree sets: {}",
-            escape_lines(&format!("{e:#}"))
-        ),
+        // Only some repositories can be searched: that is reported
+        Err(e) => {
+            let name = root.file_name().map(|n| n.to_string_lossy().into_owned());
+            not_used(name.unwrap_or_default(), &root, e)
+        }
     }
     for repo in repos {
         let git_dir = match repo.join(".git").symlink_metadata() {

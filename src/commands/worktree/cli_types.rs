@@ -25,7 +25,7 @@ pub enum WorktreeCommands {
     Diff(DiffArgs),
     /// Run a command across worktree repos
     Exec(ExecArgs),
-    /// Remove expired/orphaned worktrees
+    /// Remove expired/orphaned worktree sets of this workspace
     Prune(PruneArgs),
     #[command(external_subcommand)]
     Unknown(Vec<String>),
@@ -72,7 +72,7 @@ pub struct CreateArgs {
     #[arg(long, value_name = "DURATION", value_parser = parse_duration_clap)]
     pub ttl: Option<u64>,
 
-    /// Store custom metadata (key=value)
+    /// Record custom metadata (key=value)
     #[arg(long = "meta", value_name = "KEY=VALUE")]
     pub custom_meta: Vec<String>,
 
@@ -195,7 +195,7 @@ pub struct ExecArgs {
     #[arg(long)]
     pub all: bool,
 
-    /// Store custom metadata for ephemeral worktree (key=value)
+    /// Record custom metadata for ephemeral worktree (key=value)
     #[arg(long = "meta", value_name = "KEY=VALUE")]
     pub custom_meta: Vec<String>,
 

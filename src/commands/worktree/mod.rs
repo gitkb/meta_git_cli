@@ -193,7 +193,10 @@ fn write_worktree_help(w: &mut dyn std::io::Write) {
     let _ = writeln!(w, "  status   Show detailed status of a worktree set");
     let _ = writeln!(w, "  diff     Show cross-repo diff vs base branch");
     let _ = writeln!(w, "  exec     Run a command across worktree repos");
-    let _ = writeln!(w, "  prune    Remove expired/orphaned worktrees");
+    let _ = writeln!(
+        w,
+        "  prune    Remove expired/orphaned worktree sets of this workspace"
+    );
     let _ = writeln!(w);
     let _ = writeln!(w, "CREATE OPTIONS:");
     let _ = writeln!(w, "  --repo <ALIAS[:BRANCH]>  Add specific repo(s)");
@@ -216,7 +219,7 @@ fn write_worktree_help(w: &mut dyn std::io::Write) {
         w,
         "  --ttl <DURATION>         Time-to-live (30s, 5m, 1h, 2d, 1w)"
     );
-    let _ = writeln!(w, "  --meta <KEY=VALUE>       Store custom metadata");
+    let _ = writeln!(w, "  --meta <KEY=VALUE>       Record custom metadata");
     let _ = writeln!(w);
     let _ = writeln!(w, "LIST / STATUS OPTIONS:");
     let _ = writeln!(

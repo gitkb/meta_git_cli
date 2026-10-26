@@ -1,13 +1,17 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
 use colored::*;
-use meta_core::display::escape;
-use std::path::Path;
+use meta_core::display::{escape, escape_path};
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 
-use meta_git_lib::worktree::helpers::find_meta_dir;
+use meta_cli::worktree::discover_worktree_members;
+use meta_git_lib::worktree::helpers::{require_meta_dir, resolve_worktree_root};
 use meta_git_lib::worktree::hooks::fire_post_prune;
-use meta_git_lib::worktree::safety::{check_worktree_removal, delete_checked_set};
-use meta_git_lib::worktree::store::{entry_ttl_remaining, store_list, store_remove_batch};
+use meta_git_lib::worktree::record::{self, SetRecord};
+use meta_git_lib::worktree::safety::{
+    check_worktree_removal, delete_checked_set, linked_worktree_admin_dir, member_record,
+};
 use meta_git_lib::worktree::types::*;
 
 use super::cli_types::PruneArgs;
@@ -27,21 +31,22 @@ fn create_prune_entry(
     }
 }
 
-/// Check if a worktree entry is orphaned due to missing source repos.
+/// Check if a set is orphaned because `project` no longer has any of the
+/// repos its worktrees (`aliases`, their paths in the set) belong to.
 /// Uses a config cache to avoid redundant file I/O when multiple worktrees
 /// share the same source project.
 fn check_repo_orphaned(
-    entry: &WorktreeStoreEntry,
+    project: &Path,
+    aliases: &[String],
     config_cache: &mut std::collections::HashMap<
-        String,
+        PathBuf,
         Option<Vec<meta_core::config::ProjectInfo>>,
     >,
 ) -> Option<String> {
     let config = config_cache
-        .entry(entry.project.clone())
+        .entry(project.to_path_buf())
         .or_insert_with(|| {
-            let project_path = Path::new(&entry.project);
-            meta_core::config::find_meta_config_in(project_path)
+            meta_core::config::find_meta_config_in(project)
                 .ok()
                 .flatten()
                 .and_then(|(meta_path, _)| {
@@ -58,18 +63,17 @@ fn check_repo_orphaned(
     // "." is the project's own repo and always exists, so a set holding it is
     // never orphaned. Nested aliases ("sub/leaf") live in child .meta files,
     // not the top-level project list.
-    let missing_count = entry
-        .repos
+    let missing_count = aliases
         .iter()
-        .map(|r| r.alias.as_str())
+        .map(String::as_str)
         .filter(|alias| {
             *alias != "."
                 && !projects.iter().any(|p| p.name == *alias)
-                && !(alias.contains('/') && nested_alias_present(Path::new(&entry.project), alias))
+                && !(alias.contains('/') && nested_alias_present(project, alias))
         })
         .count();
 
-    if missing_count > 0 && missing_count == entry.repos.len() {
+    if missing_count > 0 && missing_count == aliases.len() {
         Some("orphaned (all source repos removed from project)".to_string())
     } else {
         None
@@ -94,6 +98,199 @@ fn is_missing(path: &Path) -> bool {
     matches!(path.symlink_metadata(), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
 }
 
+/// Every record naming each set path, with the admin directory it is in.
+type Records = BTreeMap<PathBuf, Vec<(PathBuf, SetRecord)>>;
+
+/// The sets meta created that prune can find from the current workspace:
+/// the sets under the worktree root, and any other set with a record in a
+/// repository of the workspace (one under `META_WORKTREES`, or one whose
+/// directory is gone). There is no global list, so sets recorded only in
+/// other workspaces' repositories are not seen. Records that can't be used
+/// are returned as kept entries.
+fn find_sets(meta_dir: &Path) -> Result<(Records, Vec<PruneEntry>)> {
+    let mut found: Vec<(PathBuf, SetRecord)> = Vec::new();
+    let mut unusable: Vec<PruneEntry> = Vec::new();
+    let mut not_used = |name: String, path: &Path, e: anyhow::Error| {
+        unusable.push(create_prune_entry(
+            name,
+            path.display().to_string(),
+            format!("meta's records there can't be read: {e:#}"),
+            None,
+        ))
+    };
+    let worktree_root = resolve_worktree_root(Some(meta_dir))?;
+    // A root that can't be read is reported; its sets are still found
+    // through their repositories, and checked one by one
+    let entries = match std::fs::read_dir(&worktree_root) {
+        Ok(entries) => entries.collect(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => vec![Err(e)],
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) => {
+                let name = worktree_root
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned());
+                not_used(name.unwrap_or_default(), &worktree_root, e.into());
+                continue;
+            }
+        };
+        if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        for member in discover_worktree_members(&entry.path()).unwrap_or_default() {
+            match member_record(&member.path) {
+                Ok(Some(found_here)) => found.push(found_here),
+                Ok(None) => {}
+                // Named by its admin directory, as the repository scan names it
+                Err(e) => {
+                    let admin = linked_worktree_admin_dir(&member.path).unwrap_or(member.path);
+                    not_used(name.clone(), &admin, e)
+                }
+            }
+        }
+    }
+    let root = meta_core::config::find_root_meta_dir(meta_dir);
+    let mut repos = vec![root.clone()];
+    match meta_core::config::walk_meta_tree(&root, None) {
+        Ok(tree) => repos.extend(
+            meta_core::config::build_project_map(&tree, &root, "")
+                .into_values()
+                .map(|(path, _)| path),
+        ),
+        // Only some repositories can be searched: that is reported
+        Err(e) => {
+            let name = root.file_name().map(|n| n.to_string_lossy().into_owned());
+            not_used(name.unwrap_or_default(), &root, e)
+        }
+    }
+    for repo in repos {
+        let git_dir = match repo_git_dir(&repo) {
+            Ok(Some(git_dir)) => git_dir,
+            Ok(None) => continue,
+            Err(e) => {
+                let name = repo.file_name().map(|n| n.to_string_lossy().into_owned());
+                not_used(name.unwrap_or_default(), &repo, e);
+                continue;
+            }
+        };
+        for (admin, record) in record::in_repo(&git_dir) {
+            match record {
+                Ok(record) => found.push((admin, record)),
+                Err(e) => {
+                    let name = admin.file_name().map(|n| n.to_string_lossy().into_owned());
+                    not_used(name.unwrap_or_default(), &admin, e)
+                }
+            }
+        }
+    }
+    let mut sets = Records::new();
+    let mut seen = BTreeSet::new();
+    for (admin, record) in found {
+        if seen.insert(admin.clone()) {
+            sets.entry(record.set.clone())
+                .or_default()
+                .push((admin, record));
+        }
+    }
+    let mut paths = BTreeSet::new();
+    unusable.retain(|e| paths.insert(e.path.clone()));
+    Ok((sets, unusable))
+}
+
+/// Why an existing set with `record`, whose worktrees are at `aliases` in
+/// it, is due for pruning, if it is: the reason and, for an expired TTL,
+/// its age.
+fn eligible(
+    record: &SetRecord,
+    aliases: &[String],
+    config_cache: &mut std::collections::HashMap<
+        PathBuf,
+        Option<Vec<meta_core::config::ProjectInfo>>,
+    >,
+    now: i64,
+) -> Option<(String, Option<u64>)> {
+    // Check if source project directory still exists
+    if !record.project.exists() {
+        return Some(("orphaned (source project missing)".to_string(), None));
+    }
+    // Check if source repos still exist in project (with config caching)
+    if let Some(reason) = check_repo_orphaned(&record.project, aliases, config_cache) {
+        return Some((reason, None));
+    }
+    // Check TTL expiration
+    let remaining = record.ttl_remaining(now).filter(|r| *r <= 0)?;
+    // Total age = configured TTL + seconds past expiry
+    let age = record
+        .ttl_seconds
+        .unwrap_or(0)
+        .saturating_add(remaining.unsigned_abs());
+    Some(("ttl_expired".to_string(), Some(age)))
+}
+
+/// The git directory holding the worktrees of the repository at `repo`:
+/// `None` if there is no repository there (not cloned).
+fn repo_git_dir(repo: &Path) -> Result<Option<PathBuf>> {
+    let dot_git = repo.join(".git");
+    // Links are followed: a `.git` linked to the real git directory is one
+    let meta = match std::fs::metadata(&dot_git) {
+        Ok(meta) => meta,
+        // A bare repository is its own git directory
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let bare = repo.join("HEAD").is_file()
+                && repo.join("objects").is_dir()
+                && repo.join("refs").is_dir();
+            return Ok(bare.then(|| repo.to_path_buf()));
+        }
+        Err(e) => {
+            return Err(
+                anyhow::Error::from(e).context(format!("Cannot inspect {}", escape_path(&dot_git)))
+            )
+        }
+    };
+    if meta.is_dir() {
+        return Ok(Some(dot_git));
+    }
+    // A `.git` file: a linked worktree's (its admin directory names the
+    // repository's git directory in `commondir`) or a `--separate-git-dir`
+    // checkout's (it names the git directory itself, with no `commondir`)
+    let content = std::fs::read_to_string(&dot_git)
+        .with_context(|| format!("Cannot read {}", escape_path(&dot_git)))?;
+    let target = content
+        .trim()
+        .strip_prefix("gitdir:")
+        .map(|target| repo.join(target.trim()))
+        .with_context(|| format!("{} has no gitdir line", escape_path(&dot_git)))?;
+    let commondir = target.join("commondir");
+    match std::fs::read_to_string(&commondir) {
+        Ok(common) => Ok(Some(target.join(common.trim()))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Some(target)),
+        Err(e) => {
+            Err(anyhow::Error::from(e).context(format!("Cannot read {}", escape_path(&commondir))))
+        }
+    }
+}
+
+/// The paths of `members` from `set`, as repo aliases (`/`-separated, as
+/// in `.meta`, on every platform).
+fn aliases<'a>(set: &Path, members: impl IntoIterator<Item = &'a Path>) -> Vec<String> {
+    members
+        .into_iter()
+        .map(|path| match path.strip_prefix(set) {
+            Ok(rel) if rel.as_os_str().is_empty() => ".".to_string(),
+            Ok(rel) => rel
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/"),
+            Err(_) => path.to_string_lossy().into_owned(),
+        })
+        .collect()
+}
+
 pub(crate) fn handle_prune(
     args: PruneArgs,
     _verbose: bool,
@@ -102,8 +299,9 @@ pub(crate) fn handle_prune(
 ) -> Result<()> {
     let dry_run = args.dry_run;
 
-    let store: WorktreeStoreData = store_list()?;
-    if store.worktrees.is_empty() {
+    let meta_dir = require_meta_dir()?;
+    let (sets, mut kept) = find_sets(&meta_dir)?;
+    if sets.is_empty() && kept.is_empty() {
         if json {
             println!(
                 "{}",
@@ -114,76 +312,67 @@ pub(crate) fn handle_prune(
                 })?
             );
         } else {
-            println!("No worktrees in store. Nothing to prune.");
+            println!("No worktree sets that meta created were found. Nothing to prune.");
         }
         return Ok(());
     }
 
     let now = Utc::now().timestamp();
-    let mut to_remove: Vec<PruneEntry> = Vec::new();
-    let mut config_cache: std::collections::HashMap<
-        String,
-        Option<Vec<meta_core::config::ProjectInfo>>,
-    > = std::collections::HashMap::new();
+    let mut to_remove: Vec<(PruneEntry, SetRecord)> = Vec::new();
+    let mut config_cache = std::collections::HashMap::new();
 
-    for (path_key, entry) in &store.worktrees {
-        let wt_path = Path::new(path_key);
-
-        // Check if path exists (orphaned detection)
-        if is_missing(wt_path) {
-            to_remove.push(create_prune_entry(
-                entry.name.clone(),
-                path_key.clone(),
-                "orphaned (missing directory)",
-                None,
-            ));
+    for (set, records) in &sets {
+        let path_key = set.display().to_string();
+        let Some((_, found)) = records.first() else {
             continue;
-        }
+        };
+        let name = found.name();
 
-        // Check if source project directory still exists
-        let project_path = Path::new(&entry.project);
-        if !project_path.exists() {
-            to_remove.push(create_prune_entry(
-                entry.name.clone(),
-                path_key.clone(),
-                "orphaned (source project missing)",
-                None,
-            ));
-            continue;
-        }
-
-        // Check if source repos still exist in project (with config caching)
-        if let Some(reason) = check_repo_orphaned(entry, &mut config_cache) {
-            to_remove.push(create_prune_entry(
-                entry.name.clone(),
-                path_key.clone(),
-                reason,
-                None,
-            ));
-            continue;
-        }
-
-        // Check TTL expiration
-        if let Some(remaining) = entry_ttl_remaining(entry, now) {
-            if remaining <= 0 {
-                // Total age = configured TTL + seconds past expiry
-                let overdue = remaining.unsigned_abs();
-                let age = entry.ttl_seconds.unwrap_or(0).saturating_add(overdue);
-                to_remove.push(create_prune_entry(
-                    entry.name.clone(),
-                    path_key.clone(),
-                    "ttl_expired",
-                    Some(age),
-                ));
+        // Check if path exists (orphaned detection). A set with a worktree
+        // still checked out (moved elsewhere) is left alone.
+        if is_missing(set) {
+            if !records
+                .iter()
+                .all(|(admin, _)| record::checkout_gone(admin))
+            {
+                continue;
             }
+            to_remove.push((
+                create_prune_entry(name, path_key, "orphaned (missing directory)", None),
+                found.clone(),
+            ));
+            continue;
+        }
+
+        // The record the set's own worktrees hold decides, not an older one
+        // left in a repository; the removal check must see this one again
+        let members = discover_worktree_members(set).unwrap_or_default();
+        let record = match record::find(set, members.iter().map(|m| &m.path)) {
+            Some(record) => record,
+            // None of its worktrees holds a record (or prune can't read
+            // them). Records left by worktrees that are gone are git's to
+            // prune; any other stands, and the check decides, as it does
+            // for a path that now leads through a link.
+            None if is_plain_dir(set)
+                && records
+                    .iter()
+                    .all(|(admin, _)| record::checkout_gone(admin)) =>
+            {
+                continue
+            }
+            None => found.clone(),
+        };
+
+        let found_aliases = aliases(set, members.iter().map(|m| m.path.as_path()));
+        if let Some((reason, age)) = eligible(&record, &found_aliases, &mut config_cache, now) {
+            to_remove.push((create_prune_entry(name, path_key, reason, age), record));
         }
     }
 
     // Prune never discards work: a candidate whose directory holds anything
     // that deleting it would lose is kept, with the reason.
-    let mut kept = Vec::new();
     let mut candidates = Vec::new();
-    for entry in to_remove {
+    for (entry, record) in to_remove {
         let wt_path = Path::new(&entry.path);
         if is_missing(wt_path) {
             candidates.push((entry, None));
@@ -198,21 +387,22 @@ pub(crate) fn handle_prune(
             ));
             continue;
         }
-        // Deleting a set would delete any recorded set inside it.
-        let nested: Vec<&str> = store
-            .worktrees
-            .keys()
-            .map(String::as_str)
-            .filter(|k| Path::new(k) != wt_path && Path::new(k).starts_with(wt_path))
-            .collect();
+        // A set holding another set is blocked by the check.
         let problems = match check_worktree_removal(wt_path) {
-            _ if !nested.is_empty() => {
-                format!("it holds other worktree sets: {}", nested.join(", "))
-            }
-            Ok(check) if check.is_clear() => {
-                candidates.push((entry, Some(check)));
+            Ok(check) if check.is_clear() && check.record() == Some(&record) => {
+                // Judged again with every repo the full scan found: only it
+                // finds repos nested in other repos
+                let all = aliases(wt_path, check.members.iter().map(|m| m.path.as_path()));
+                if let Some((reason, age)) = eligible(&record, &all, &mut config_cache, now) {
+                    let entry = create_prune_entry(entry.name, entry.path, reason, age);
+                    candidates.push((entry, Some(check)));
+                }
                 continue;
             }
+            Ok(check) if check.is_clear() && check.record().is_some() => {
+                "its record changed after prune read it".to_string()
+            }
+            Ok(check) if check.is_clear() => "meta's record of it is gone".to_string(),
             Ok(check) => [check.blockers, check.unsaved].concat().join("; "),
             Err(e) => format!("cannot inspect it: {e:#}"),
         };
@@ -257,7 +447,7 @@ pub(crate) fn handle_prune(
         return Ok(());
     }
 
-    // Actually remove: physical cleanup first, then batch store update.
+    // Actually remove: each checked set, or the records of a missing one.
     let mut removed = Vec::new();
     let mut failed = Vec::new();
     for (prune_entry, check) in candidates {
@@ -276,7 +466,7 @@ pub(crate) fn handle_prune(
                     continue;
                 }
             },
-            // A missing directory only loses its record. One that has
+            // A missing directory only loses its records. One that has
             // reappeared since was never checked: keep it, nothing failed.
             None if !is_missing(wt_path) => {
                 kept.push(create_prune_entry(
@@ -287,7 +477,7 @@ pub(crate) fn handle_prune(
                 ));
                 continue;
             }
-            None => Ok(()),
+            None => forget(Path::new(&prune_entry.path), &sets),
         };
         match removal {
             Ok(()) => removed.push(prune_entry),
@@ -303,22 +493,8 @@ pub(crate) fn handle_prune(
         }
     }
 
-    // Batch-remove the pruned records in a single lock cycle, each only if it
-    // is still the record this run read.
-    let records: Vec<(String, String)> = removed
-        .iter()
-        .filter_map(|e| {
-            let entry = store.worktrees.get(&e.path)?;
-            Some((e.path.clone(), entry.created_at.clone()))
-        })
-        .collect();
-    // A failure is reported after the hook and output: the sets are gone
-    let stored = store_remove_batch(&records)
-        .context("Pruned worktrees, but could not update the worktree store");
-
     // Fire post-prune hook
-    let meta_dir = find_meta_dir();
-    fire_post_prune(&removed, meta_dir.as_deref());
+    fire_post_prune(&removed, Some(&meta_dir));
 
     if json {
         println!(
@@ -342,24 +518,33 @@ pub(crate) fn handle_prune(
         print_kept(&kept);
     }
 
-    // Every failure is reported, the store's and the sets' alike
-    let mut problems = Vec::new();
-    if let Err(e) = stored {
-        problems.push(format!("{e:#}"));
-    }
     if !failed.is_empty() {
-        problems.push(format!("Failed to prune: {}", escape(&failed.join(", "))));
-    }
-    if !problems.is_empty() {
-        anyhow::bail!("{}", problems.join("\n"));
+        anyhow::bail!("Failed to prune: {}", escape(&failed.join(", ")));
     }
     warn_kept(&kept, strict)
+}
+
+/// Delete the records of a set whose directory is gone, each only if its
+/// worktree is still gone and it is still the record prune read. Git's own
+/// entries for its worktrees stay, for `git worktree prune`.
+fn forget(set: &Path, sets: &Records) -> Result<()> {
+    for (admin, record) in sets.get(set).into_iter().flatten() {
+        if record::checkout_gone(admin) && record::read(admin)?.as_ref() == Some(record) {
+            record::delete(admin)?;
+        }
+    }
+    Ok(())
+}
+
+/// Whether `path` is a directory reached without following any link.
+fn is_plain_dir(path: &Path) -> bool {
+    path.symlink_metadata().is_ok_and(|m| m.is_dir()) && path_moved(path).is_none()
 }
 
 /// Why the recorded path no longer resolves to itself, if it doesn't: a
 /// directory above it became a symlink, which could lead into another set,
 /// or it can't be resolved at all.
-/// The store records each set's resolved path when it is created. A link at
+/// Each record holds its set's resolved path from when it was created. A link at
 /// the set directory itself is left to the removal check, which refuses it.
 fn path_moved(path: &Path) -> Option<String> {
     match path.symlink_metadata() {
@@ -402,23 +587,23 @@ mod tests {
     use std::collections::HashMap;
     use tempfile::TempDir;
 
-    fn make_store_entry(name: &str, project: &str, repos: Vec<(&str, &str)>) -> WorktreeStoreEntry {
-        WorktreeStoreEntry {
-            name: name.to_string(),
-            project: project.to_string(),
-            created_at: "2025-01-01T00:00:00Z".to_string(),
-            ephemeral: false,
-            ttl_seconds: None,
-            repos: repos
-                .into_iter()
-                .map(|(alias, branch)| StoreRepoEntry {
-                    alias: alias.to_string(),
-                    branch: branch.to_string(),
-                    created_branch: false,
-                })
-                .collect(),
-            custom: HashMap::new(),
-        }
+    /// A set's project and aliases, as check_repo_orphaned takes them.
+    fn make_set(project: &str, repos: Vec<(&str, &str)>) -> (PathBuf, Vec<String>) {
+        let aliases = repos
+            .into_iter()
+            .map(|(alias, _)| alias.to_string())
+            .collect();
+        (PathBuf::from(project), aliases)
+    }
+
+    #[test]
+    fn aliases_use_slashes_on_every_platform() {
+        let set = Path::new("set");
+        let members = [set.to_path_buf(), set.join("group").join("core")];
+        assert_eq!(
+            aliases(set, members.iter().map(PathBuf::as_path)),
+            [".", "group/core"]
+        );
     }
 
     // ── create_prune_entry ──────────────────────────────
@@ -472,14 +657,13 @@ mod tests {
         let meta_config = r#"{"projects":{"repo1":"git@github.com:org/repo1.git","repo2":"git@github.com:org/repo2.git"}}"#;
         std::fs::write(project_path.join(".meta"), meta_config).unwrap();
 
-        let entry = make_store_entry(
-            "test-wt",
+        let entry = make_set(
             project_path.to_str().unwrap(),
             vec![("repo1", "main"), ("repo2", "feat-x")],
         );
 
         let mut cache = HashMap::new();
-        let result = check_repo_orphaned(&entry, &mut cache);
+        let result = check_repo_orphaned(&entry.0, &entry.1, &mut cache);
 
         assert!(result.is_none());
     }
@@ -493,14 +677,13 @@ mod tests {
         let meta_config = r#"{"projects":{"repo3":"git@github.com:org/repo3.git"}}"#;
         std::fs::write(project_path.join(".meta"), meta_config).unwrap();
 
-        let entry = make_store_entry(
-            "test-wt",
+        let entry = make_set(
             project_path.to_str().unwrap(),
             vec![("repo1", "main"), ("repo2", "feat-x")],
         );
 
         let mut cache = HashMap::new();
-        let result = check_repo_orphaned(&entry, &mut cache);
+        let result = check_repo_orphaned(&entry.0, &entry.1, &mut cache);
 
         assert_eq!(
             result,
@@ -517,14 +700,13 @@ mod tests {
         let meta_config = r#"{"projects":{"repo1":"git@github.com:org/repo1.git"}}"#;
         std::fs::write(project_path.join(".meta"), meta_config).unwrap();
 
-        let entry = make_store_entry(
-            "test-wt",
+        let entry = make_set(
             project_path.to_str().unwrap(),
             vec![("repo1", "main"), ("repo2", "feat-x")],
         );
 
         let mut cache = HashMap::new();
-        let result = check_repo_orphaned(&entry, &mut cache);
+        let result = check_repo_orphaned(&entry.0, &entry.1, &mut cache);
 
         // Only partial orphan - should return None (worktree is still partially valid)
         assert!(result.is_none());
@@ -539,12 +721,13 @@ mod tests {
         let project = project_path.to_str().unwrap();
         let mut cache = HashMap::new();
 
-        let root_only = make_store_entry("root-only", project, vec![(".", "main")]);
-        assert!(check_repo_orphaned(&root_only, &mut cache).is_none());
+        let root_only = make_set(project, vec![(".", "main")]);
+        assert!(check_repo_orphaned(&root_only.0, &root_only.1, &mut cache).is_none());
 
-        let root_and_removed =
-            make_store_entry("removed", project, vec![(".", "main"), ("repo1", "main")]);
-        assert!(check_repo_orphaned(&root_and_removed, &mut cache).is_none());
+        let root_and_removed = make_set(project, vec![(".", "main"), ("repo1", "main")]);
+        assert!(
+            check_repo_orphaned(&root_and_removed.0, &root_and_removed.1, &mut cache).is_none()
+        );
     }
 
     #[test]
@@ -558,12 +741,8 @@ mod tests {
         let sub_config = r#"{"projects":{"leaf":"git@github.com:org/leaf.git"}}"#;
         std::fs::write(project_path.join("sub/.meta"), sub_config).unwrap();
 
-        let entry = make_store_entry(
-            "nested",
-            project_path.to_str().unwrap(),
-            vec![("sub/leaf", "main")],
-        );
-        assert!(check_repo_orphaned(&entry, &mut HashMap::new()).is_none());
+        let entry = make_set(project_path.to_str().unwrap(), vec![("sub/leaf", "main")]);
+        assert!(check_repo_orphaned(&entry.0, &entry.1, &mut HashMap::new()).is_none());
     }
 
     #[test]
@@ -572,14 +751,10 @@ mod tests {
         let project_path = temp_dir.path();
 
         // No .meta config file
-        let entry = make_store_entry(
-            "test-wt",
-            project_path.to_str().unwrap(),
-            vec![("repo1", "main")],
-        );
+        let entry = make_set(project_path.to_str().unwrap(), vec![("repo1", "main")]);
 
         let mut cache = HashMap::new();
-        let result = check_repo_orphaned(&entry, &mut cache);
+        let result = check_repo_orphaned(&entry.0, &entry.1, &mut cache);
 
         // Can't determine without config
         assert!(result.is_none());
@@ -594,32 +769,24 @@ mod tests {
         let meta_config = r#"{"projects":{"repo1":"git@github.com:org/repo1.git"}}"#;
         std::fs::write(project_path.join(".meta"), meta_config).unwrap();
 
-        let entry1 = make_store_entry(
-            "test-wt-1",
-            project_path.to_str().unwrap(),
-            vec![("repo1", "main")],
-        );
+        let entry1 = make_set(project_path.to_str().unwrap(), vec![("repo1", "main")]);
 
-        let entry2 = make_store_entry(
-            "test-wt-2",
-            project_path.to_str().unwrap(),
-            vec![("repo1", "feat-x")],
-        );
+        let entry2 = make_set(project_path.to_str().unwrap(), vec![("repo1", "feat-x")]);
 
         let mut cache = HashMap::new();
 
         // First call should populate cache
-        let result1 = check_repo_orphaned(&entry1, &mut cache);
+        let result1 = check_repo_orphaned(&entry1.0, &entry1.1, &mut cache);
         assert!(result1.is_none());
         assert_eq!(cache.len(), 1);
 
         // Second call with same project should use cache
-        let result2 = check_repo_orphaned(&entry2, &mut cache);
+        let result2 = check_repo_orphaned(&entry2.0, &entry2.1, &mut cache);
         assert!(result2.is_none());
         assert_eq!(cache.len(), 1); // Still 1 entry (cached)
 
         // Verify cache contains the correct project
-        assert!(cache.contains_key(project_path.to_str().unwrap()));
+        assert!(cache.contains_key(project_path));
     }
 
     #[test]
@@ -630,14 +797,10 @@ mod tests {
         // Create invalid .meta config
         std::fs::write(project_path.join(".meta"), "invalid json").unwrap();
 
-        let entry = make_store_entry(
-            "test-wt",
-            project_path.to_str().unwrap(),
-            vec![("repo1", "main")],
-        );
+        let entry = make_set(project_path.to_str().unwrap(), vec![("repo1", "main")]);
 
         let mut cache = HashMap::new();
-        let result = check_repo_orphaned(&entry, &mut cache);
+        let result = check_repo_orphaned(&entry.0, &entry.1, &mut cache);
 
         // Should return None (can't parse config)
         assert!(result.is_none());

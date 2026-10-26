@@ -182,8 +182,8 @@ fn handle_ephemeral_exec(args: ExecArgs, verbose: bool, json: bool) -> Result<()
 
     let exec_result = config.and_then(|config| loop_lib::run(&config, &cmd_parts));
 
-    // Clean up before propagating the result; a failed cleanup (such as an
-    // unwritable store) fails the command too
+    // Clean up before propagating the result; a failed cleanup (such as a
+    // checkout git cannot delete) fails the command too
     let cleanup = guard.finish();
     match (exec_result, cleanup) {
         (Err(e), Err(cleanup_error)) => {

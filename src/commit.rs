@@ -1,6 +1,6 @@
 use console::style;
 use meta_core::config;
-use meta_core::display::escape_path;
+use meta_core::display::{escape, escape_path};
 use meta_plugin_protocol::{CommandResult, PlannedCommand, PluginRequestOptions};
 use std::process::Command;
 
@@ -105,7 +105,7 @@ pub(crate) fn execute_git_commit(
         // No message provided, show what would be committed
         println!("Repositories with staged changes:");
         for (name, _path, files) in &repos_with_changes {
-            println!("  {} ({} files)", style(name).cyan(), files.len());
+            println!("  {} ({} files)", style(escape(name)).cyan(), files.len());
         }
         println!();
         println!(
@@ -222,7 +222,7 @@ fn execute_editor_commit(repos: &[(String, String, Vec<String>)]) -> anyhow::Res
         println!(
             "{} Committing {}...",
             style("→").cyan(),
-            style(repo_name).bold()
+            style(escape(repo_name)).bold()
         );
 
         let status = Command::new("git")
@@ -238,7 +238,7 @@ fn execute_editor_commit(repos: &[(String, String, Vec<String>)]) -> anyhow::Res
                 println!(
                     "  {} {}",
                     style("✓").green(),
-                    message.lines().next().unwrap_or("")
+                    escape(message.lines().next().unwrap_or(""))
                 );
                 succeeded += 1;
             }

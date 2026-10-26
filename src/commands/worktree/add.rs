@@ -93,7 +93,13 @@ pub(crate) fn handle_add(args: AddArgs, verbose: bool, json: bool) -> Result<()>
         // Ensure parent directories exist for nested paths (e.g., "vendor/")
         if let Some(parent) = dest.parent() {
             if parent != wt_dir {
-                std::fs::create_dir_all(parent)?;
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    failed = Some(
+                        anyhow::Error::from(e)
+                            .context(format!("Cannot create {}", escape_path(parent))),
+                    );
+                    break;
+                }
             }
         }
 

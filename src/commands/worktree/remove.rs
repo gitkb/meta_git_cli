@@ -1,5 +1,6 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use colored::*;
+use meta_core::display::{escape, escape_path};
 
 use meta_git_lib::worktree::helpers::*;
 use meta_git_lib::worktree::hooks::fire_post_destroy;
@@ -9,22 +10,17 @@ use meta_git_lib::worktree::types::*;
 
 use super::cli_types::DestroyArgs;
 
-pub(crate) fn handle_remove(
-    args: DestroyArgs,
-    verbose: bool,
-    json: bool,
-    strict: bool,
-) -> Result<()> {
+pub(crate) fn handle_remove(args: DestroyArgs, verbose: bool, json: bool) -> Result<()> {
     let name = &args.name;
     validate_worktree_name(name)?;
     let force = args.force;
 
     let meta_dir = find_meta_dir();
     let worktree_root = resolve_worktree_root(meta_dir.as_deref())?;
-    let wt_dir = worktree_root.join(name);
+    let wt_dir = worktree_set_dir(&worktree_root, name)?;
 
     if !wt_dir.exists() {
-        anyhow::bail!("Worktree '{}' not found at {}", name, wt_dir.display());
+        anyhow::bail!("Worktree '{}' not found at {}", name, escape_path(&wt_dir));
     }
 
     // Only delete what meta created: the store records every worktree set it made.
@@ -33,7 +29,7 @@ pub(crate) fn handle_remove(
             "Refusing to remove {}: meta has no record of creating a worktree there.\n\
              If it is a worktree whose record was lost, delete it yourself and run \
              'git worktree prune' in its repositories.",
-            wt_dir.display()
+            escape_path(&wt_dir)
         );
     };
 
@@ -46,7 +42,7 @@ pub(crate) fn handle_remove(
         .chain(
             nested
                 .iter()
-                .map(|k| format!("{k}: another worktree set; remove it first")),
+                .map(|k| format!("{}: another worktree set; remove it first", escape(k))),
         )
         .collect();
     if !blockers.is_empty() {
@@ -76,7 +72,10 @@ pub(crate) fn handle_remove(
     // Remove from centralized store
     // By the key read before deleting: the deleted path can't be resolved again.
     let record = [(record_key, record.created_at)];
-    super::warn_store_error(store_remove_batch(&record), strict)?;
+    // A failure is reported after the hook and output: the worktree is gone
+    let stored = store_remove_batch(&record).with_context(|| {
+        format!("Removed worktree '{name}', but could not update the worktree store")
+    });
 
     // Fire post-destroy hook
     fire_post_destroy(name, &wt_dir, force, meta_dir.as_deref());
@@ -91,5 +90,5 @@ pub(crate) fn handle_remove(
     } else {
         println!("{} Removed worktree '{}'", "✓".green(), name.bold());
     }
-    Ok(())
+    stored
 }

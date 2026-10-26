@@ -81,7 +81,7 @@ pub fn execute_command(
 
     match result {
         Ok(cmd_result) => cmd_result,
-        Err(e) => CommandResult::Error(format!("{e}")),
+        Err(e) => CommandResult::Error(format!("{e:#}")),
     }
 }
 
@@ -193,7 +193,7 @@ fn execute_raw_git_command(
     // Get project directories
     let dirs = match get_project_directories_with_fallback(projects, cwd) {
         Ok(d) => d,
-        Err(e) => return CommandResult::Error(format!("Failed to get project directories: {e}")),
+        Err(e) => return CommandResult::Error(format!("Failed to get project directories: {e:#}")),
     };
 
     // The git argv: the command words (e.g. "git" or "git add") and the
@@ -745,6 +745,23 @@ the only commit message
 
         // Should return just "." when no .meta file
         assert_eq!(dirs, vec!["."]);
+    }
+
+    #[test]
+    fn test_get_project_directories_refuses_a_bad_meta_file() {
+        // A refused config is an error, not "just the root"
+        let temp_dir = TempDir::new().unwrap();
+        std::fs::write(
+            temp_dir.path().join(".meta"),
+            r#"{"projects": {"evil": {"repo": "u", "path": "../../x"}}}"#,
+        )
+        .unwrap();
+
+        let err = get_project_directories(temp_dir.path()).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("must not contain '..'"),
+            "{err:#}"
+        );
     }
 
     #[test]

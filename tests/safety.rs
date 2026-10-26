@@ -63,6 +63,18 @@ fn workspace(root: &Path, projects: &[&str]) -> std::path::PathBuf {
 
 /// Invoke the plugin protocol in `cwd` with an isolated store under `root/data`.
 fn meta_git(root: &Path, cwd: &Path, command: &str, args: &[&str], options: Value) -> Output {
+    meta_git_in(root, cwd, command, args, options, None)
+}
+
+/// [`meta_git`], with `META_WORKTREES` set to `worktrees` if given.
+fn meta_git_in(
+    root: &Path,
+    cwd: &Path,
+    command: &str,
+    args: &[&str],
+    options: Value,
+    worktrees: Option<&Path>,
+) -> Output {
     let request = json!({"command": command, "args": args, "cwd": cwd, "options": options});
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_meta-git"));
     if root.join("bin").is_dir() {
@@ -75,6 +87,7 @@ fn meta_git(root: &Path, cwd: &Path, command: &str, args: &[&str], options: Valu
         .current_dir(cwd)
         .env("META_DATA_DIR", root.join("data"))
         .env_remove("META_WORKTREES")
+        .envs(worktrees.map(|dir| ("META_WORKTREES", dir)))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -112,8 +125,9 @@ fn remove_refuses_directories_meta_did_not_create() {
     assert!(stderr(&out).contains("no record"), "{}", stderr(&out));
     assert!(ws.join(".worktrees/notawt/data").exists());
 
-    // worktrees_dir "." makes the primary clone `a` look like a worktree. Even
-    // with a forged store record, a primary checkout is never deleted.
+    // worktrees_dir "." would make the primary clone `a` look like a worktree.
+    // Such a config is refused, so even with a forged store record the
+    // primary checkout is never deleted.
     let config = json!({"worktrees_dir": ".", "projects": {"a": "unused"}});
     fs::write(ws.join(".meta"), config.to_string()).unwrap();
     let key = ws.join("a").canonicalize().unwrap();
@@ -123,6 +137,30 @@ fn remove_refuses_directories_meta_did_not_create() {
     fs::create_dir_all(root.join("data")).unwrap();
     fs::write(root.join("data/worktree.json"), store.to_string()).unwrap();
     let out = worktree(root, &ws, &["remove", "a", "--force"]);
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("Invalid worktrees_dir"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(ws.join("a/README").exists());
+
+    // META_WORKTREES may point anywhere, the workspace root included: there
+    // the primary clone `a` looks like a set, and the forged record would
+    // remove it. The removal check refuses a primary checkout.
+    fs::write(
+        ws.join(".meta"),
+        json!({"projects": {"a": "unused"}}).to_string(),
+    )
+    .unwrap();
+    let out = meta_git_in(
+        root,
+        &ws,
+        "git worktree remove",
+        &["a", "--force"],
+        json!({}),
+        Some(&ws),
+    );
     assert!(!out.status.success());
     assert!(
         stderr(&out).contains("not a linked worktree"),
@@ -640,9 +678,11 @@ fn remove_drops_the_record_when_the_worktrees_dir_is_a_link() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
     let ws = workspace(root, &["a"]);
-    fs::create_dir(root.join("real")).unwrap();
-    std::os::unix::fs::symlink(root.join("real"), root.join("link")).unwrap();
-    let config = json!({"worktrees_dir": "../link", "projects": {"a": "unused"}});
+    // worktrees_dir must stay inside the workspace; a link there still
+    // resolves to another path than the one written
+    fs::create_dir(ws.join("real")).unwrap();
+    std::os::unix::fs::symlink(ws.join("real"), ws.join("link")).unwrap();
+    let config = json!({"worktrees_dir": "link", "projects": {"a": "unused"}});
     fs::write(ws.join(".meta"), config.to_string()).unwrap();
 
     let out = worktree(root, &ws, &["create", "t", "--repo", "a", "--no-deps"]);

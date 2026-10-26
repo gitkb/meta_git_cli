@@ -13,6 +13,7 @@ mod status;
 use anyhow::Result;
 use clap::Parser;
 use colored::*;
+use meta_core::display::escape_lines;
 use meta_plugin_protocol::{CommandResult, PluginRequestOptions};
 use std::path::Path;
 
@@ -122,9 +123,9 @@ fn handle_worktree_command(
 ) -> Result<()> {
     match command {
         WorktreeCommands::Create(args) => create::handle_create(args, verbose, json, global_strict),
-        WorktreeCommands::Add(args) => add::handle_add(args, verbose, json, global_strict),
+        WorktreeCommands::Add(args) => add::handle_add(args, verbose, json),
         WorktreeCommands::Remove(args) | WorktreeCommands::Destroy(args) => {
-            remove::handle_remove(args, verbose, json, global_strict)
+            remove::handle_remove(args, verbose, json)
         }
         WorktreeCommands::List(args) => list::handle_list(args, verbose, json, cwd),
         WorktreeCommands::Status(args) => status::handle_status(args, verbose, json),
@@ -155,19 +156,13 @@ pub(crate) fn warn_or_bail(strict: bool, message: impl std::fmt::Display) -> any
     if strict {
         anyhow::bail!("{message} (strict mode)")
     } else {
-        eprintln!("{} {}", "warning:".yellow().bold(), message);
+        // the message can carry paths and names from git and the filesystem
+        eprintln!(
+            "{} {}",
+            "warning:".yellow().bold(),
+            escape_lines(&message.to_string())
+        );
         Ok(())
-    }
-}
-
-/// Log a store operation error as a warning, or propagate in strict mode.
-///
-/// In strict mode, returns the error to fail the command.
-/// In normal mode, prints a warning and continues.
-pub(crate) fn warn_store_error(result: anyhow::Result<()>, strict: bool) -> anyhow::Result<()> {
-    match result {
-        Ok(()) => Ok(()),
-        Err(e) => warn_or_bail(strict, format!("Failed to update store: {e}")),
     }
 }
 
@@ -290,31 +285,5 @@ mod tests {
         let result = warn_or_bail(true, "specific error details");
         let err = result.unwrap_err();
         assert!(err.to_string().contains("specific error details"));
-    }
-
-    // ── warn_store_error tests ─────────────────────────────
-
-    #[test]
-    fn warn_store_error_passes_through_ok() {
-        let result = warn_store_error(Ok(()), false);
-        assert!(result.is_ok());
-
-        let result_strict = warn_store_error(Ok(()), true);
-        assert!(result_strict.is_ok());
-    }
-
-    #[test]
-    fn warn_store_error_returns_ok_for_error_in_normal_mode() {
-        let result = warn_store_error(Err(anyhow::anyhow!("store failed")), false);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn warn_store_error_returns_err_in_strict_mode() {
-        let result = warn_store_error(Err(anyhow::anyhow!("store failed")), true);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(err.to_string().contains("Failed to update store"));
-        assert!(err.to_string().contains("store failed"));
     }
 }

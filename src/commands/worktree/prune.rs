@@ -1,9 +1,10 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::Utc;
 use colored::*;
+use meta_core::display::escape;
 use std::path::Path;
 
-use meta_git_lib::worktree::helpers::{find_meta_dir, lookup_nested_project};
+use meta_git_lib::worktree::helpers::find_meta_dir;
 use meta_git_lib::worktree::hooks::fire_post_prune;
 use meta_git_lib::worktree::safety::{check_worktree_removal, delete_checked_set};
 use meta_git_lib::worktree::store::{entry_ttl_remaining, store_list, store_remove_batch};
@@ -40,11 +41,14 @@ fn check_repo_orphaned(
         .entry(entry.project.clone())
         .or_insert_with(|| {
             let project_path = Path::new(&entry.project);
-            meta_core::config::find_meta_config_in(project_path).and_then(|(meta_path, _)| {
-                meta_core::config::parse_meta_config(&meta_path)
-                    .ok()
-                    .map(|(projects, _)| projects)
-            })
+            meta_core::config::find_meta_config_in(project_path)
+                .ok()
+                .flatten()
+                .and_then(|(meta_path, _)| {
+                    meta_core::config::parse_meta_config(&meta_path)
+                        .ok()
+                        .map(|(projects, _)| projects)
+                })
         });
 
     let Some(projects) = config else {
@@ -61,8 +65,7 @@ fn check_repo_orphaned(
         .filter(|alias| {
             *alias != "."
                 && !projects.iter().any(|p| p.name == *alias)
-                && !(alias.contains('/')
-                    && lookup_nested_project(Path::new(&entry.project), alias).is_ok())
+                && !(alias.contains('/') && nested_alias_present(Path::new(&entry.project), alias))
         })
         .count();
 
@@ -70,6 +73,17 @@ fn check_repo_orphaned(
         Some("orphaned (all source repos removed from project)".to_string())
     } else {
         None
+    }
+}
+
+/// Whether nested alias `alias` still names a repo of `project`. A nested
+/// config that can't be read or is refused says nothing about the repo, so
+/// it counts as present: only a tree that reads cleanly without the alias
+/// makes the repo removed.
+fn nested_alias_present(project: &Path, alias: &str) -> bool {
+    match meta_core::config::walk_meta_tree(project, None) {
+        Ok(tree) => meta_core::config::build_project_map(&tree, project, "").contains_key(alias),
+        Err(_) => true,
     }
 }
 
@@ -175,6 +189,15 @@ pub(crate) fn handle_prune(
             candidates.push((entry, None));
             continue;
         }
+        if let Some(why) = path_moved(wt_path) {
+            kept.push(create_prune_entry(
+                entry.name,
+                entry.path,
+                format!("{}, but {why}", entry.reason),
+                entry.age_seconds,
+            ));
+            continue;
+        }
         // Deleting a set would delete any recorded set inside it.
         let nested: Vec<&str> = store
             .worktrees
@@ -218,7 +241,12 @@ pub(crate) fn handle_prune(
             } else {
                 println!("Would prune {} worktree(s):", would_remove.len());
                 for entry in &would_remove {
-                    println!("  {} ({}) — {}", entry.name, entry.reason, entry.path);
+                    println!(
+                        "  {} ({}) — {}",
+                        escape(&entry.name),
+                        escape(&entry.reason),
+                        escape(&entry.path)
+                    );
                 }
             }
             print_kept(&kept);
@@ -235,7 +263,19 @@ pub(crate) fn handle_prune(
     for (prune_entry, check) in candidates {
         let wt_path = Path::new(&prune_entry.path);
         let removal = match &check {
-            Some(check) => delete_checked_set(wt_path, check, false, false),
+            // Checked again: a directory above may have become a link since
+            Some(check) => match path_moved(wt_path) {
+                None => delete_checked_set(wt_path, check, false, false),
+                Some(why) => {
+                    kept.push(create_prune_entry(
+                        prune_entry.name,
+                        prune_entry.path,
+                        format!("{}, but {why}", prune_entry.reason),
+                        prune_entry.age_seconds,
+                    ));
+                    continue;
+                }
+            },
             // A missing directory only loses its record. One that has
             // reappeared since was never checked: keep it, nothing failed.
             None if !is_missing(wt_path) => {
@@ -272,7 +312,9 @@ pub(crate) fn handle_prune(
             Some((e.path.clone(), entry.created_at.clone()))
         })
         .collect();
-    super::warn_store_error(store_remove_batch(&records), strict)?;
+    // A failure is reported after the hook and output: the sets are gone
+    let stored = store_remove_batch(&records)
+        .context("Pruned worktrees, but could not update the worktree store");
 
     // Fire post-prune hook
     let meta_dir = find_meta_dir();
@@ -290,15 +332,44 @@ pub(crate) fn handle_prune(
     } else {
         println!("{} Pruned {} worktree(s):", "✓".green(), removed.len());
         for entry in &removed {
-            println!("  {} ({}) — {}", entry.name, entry.reason, entry.path);
+            println!(
+                "  {} ({}) — {}",
+                escape(&entry.name),
+                escape(&entry.reason),
+                escape(&entry.path)
+            );
         }
         print_kept(&kept);
     }
 
+    // Every failure is reported, the store's and the sets' alike
+    let mut problems = Vec::new();
+    if let Err(e) = stored {
+        problems.push(format!("{e:#}"));
+    }
     if !failed.is_empty() {
-        anyhow::bail!("Failed to prune: {}", failed.join(", "));
+        problems.push(format!("Failed to prune: {}", escape(&failed.join(", "))));
+    }
+    if !problems.is_empty() {
+        anyhow::bail!("{}", problems.join("\n"));
     }
     warn_kept(&kept, strict)
+}
+
+/// Why the recorded path no longer resolves to itself, if it doesn't: a
+/// directory above it became a symlink, which could lead into another set,
+/// or it can't be resolved at all.
+/// The store records each set's resolved path when it is created. A link at
+/// the set directory itself is left to the removal check, which refuses it.
+fn path_moved(path: &Path) -> Option<String> {
+    match path.symlink_metadata() {
+        Ok(meta) if !meta.file_type().is_symlink() => match path.canonicalize() {
+            Ok(resolved) if resolved == path => None,
+            Ok(_) => Some("a directory above it now leads elsewhere through a symlink".to_string()),
+            Err(e) => Some(format!("its path cannot be resolved ({e})")),
+        },
+        _ => None,
+    }
 }
 
 fn print_kept(kept: &[PruneEntry]) {
@@ -307,7 +378,12 @@ fn print_kept(kept: &[PruneEntry]) {
     }
     println!("Kept {} worktree(s):", kept.len());
     for entry in kept {
-        println!("  {} ({}) — {}", entry.name, entry.reason, entry.path);
+        println!(
+            "  {} ({}) — {}",
+            escape(&entry.name),
+            escape(&entry.reason),
+            escape(&entry.path)
+        );
     }
 }
 

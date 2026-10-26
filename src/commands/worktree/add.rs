@@ -1,5 +1,6 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use colored::*;
+use meta_core::display::{escape, escape_path};
 
 use meta_cli::worktree::discover_worktree_repos;
 use meta_git_lib::worktree::git_ops::git_worktree_add;
@@ -9,7 +10,7 @@ use meta_git_lib::worktree::types::*;
 
 use super::cli_types::AddArgs;
 
-pub(crate) fn handle_add(args: AddArgs, verbose: bool, json: bool, strict: bool) -> Result<()> {
+pub(crate) fn handle_add(args: AddArgs, verbose: bool, json: bool) -> Result<()> {
     let name = &args.name;
     validate_worktree_name(name)?;
 
@@ -25,46 +26,100 @@ pub(crate) fn handle_add(args: AddArgs, verbose: bool, json: bool, strict: bool)
 
     let meta_dir = require_meta_dir()?;
     let worktree_root = resolve_worktree_root(Some(&meta_dir))?;
-    let wt_dir = worktree_root.join(name);
+    let wt_dir = worktree_set_dir(&worktree_root, name)?;
 
     if !wt_dir.exists() {
-        anyhow::bail!("Worktree '{}' not found at {}", name, wt_dir.display());
+        anyhow::bail!("Worktree '{}' not found at {}", name, escape_path(&wt_dir));
     }
 
     // Check existing repos in the worktree
     let existing = discover_worktree_repos(&wt_dir)?;
 
-    let mut added = Vec::new();
-    for spec in repo_specs {
+    // Check every repo before adding any: one refused after others were
+    // added would leave those out of the store
+    let mut planned = Vec::new();
+    for (i, spec) in repo_specs.iter().enumerate() {
+        // As in create: a repeat is one worktree, a repeat on another branch
+        // is refused
+        if let Some(first) = repo_specs.iter().take(i).find(|o| o.alias == spec.alias) {
+            if first.branch != spec.branch {
+                anyhow::bail!(
+                    "Repo '{}' is given twice, on branches '{}' and '{}'",
+                    escape(&spec.alias),
+                    escape(first.branch.as_deref().unwrap_or("(default)")),
+                    escape(spec.branch.as_deref().unwrap_or("(default)"))
+                );
+            }
+            continue;
+        }
         if existing.iter().any(|r| r.alias == spec.alias) {
-            anyhow::bail!("Repo '{}' already exists in worktree '{name}'", spec.alias);
+            anyhow::bail!(
+                "Repo '{}' already exists in worktree '{name}'",
+                escape(&spec.alias)
+            );
         }
 
         // Use recursive lookup for nested paths (containing '/')
         let (source, _project) = lookup_nested_project(&meta_dir, &spec.alias)?;
 
-        let branch = resolve_branch(name, None, spec.branch.as_deref());
         // Preserve the full alias as the destination path so that relative
         // references (e.g., Cargo.toml workspace members) remain valid.
         let dest = wt_dir.join(&spec.alias);
+        // A checkout already in the worktree (such as the root repo's) may
+        // hold a symlink where this one goes; git must not follow it out
+        meta_core::config::resolve_inside(&wt_dir, &spec.alias).map_err(|why| {
+            anyhow::anyhow!(
+                "Refusing to add the worktree for '{}': {why}",
+                escape(&spec.alias)
+            )
+        })?;
+        planned.push((spec, source, dest));
+    }
+
+    let mut added = Vec::new();
+    let mut failed = None;
+    for (spec, source, dest) in planned {
+        let branch = resolve_branch(name, None, spec.branch.as_deref());
+        // Again now: a checkout added above (a parent repo's) may have put a
+        // symlink where this one goes
+        if let Err(why) = meta_core::config::resolve_inside(&wt_dir, &spec.alias) {
+            failed = Some(anyhow::anyhow!(
+                "Refusing to add the worktree for '{}': {why}",
+                escape(&spec.alias)
+            ));
+            break;
+        }
 
         // Ensure parent directories exist for nested paths (e.g., "vendor/")
         if let Some(parent) = dest.parent() {
             if parent != wt_dir {
-                std::fs::create_dir_all(parent)?;
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    failed = Some(
+                        anyhow::Error::from(e)
+                            .context(format!("Cannot create {}", escape_path(parent))),
+                    );
+                    break;
+                }
             }
         }
 
         if verbose {
             eprintln!(
                 "Adding worktree for '{}' at {} (branch: {})",
-                spec.alias,
-                dest.display(),
-                branch
+                escape(&spec.alias),
+                escape_path(&dest),
+                escape(&branch)
             );
         }
 
-        let created_branch = git_worktree_add(&source, &dest, &branch, None)?.is_some();
+        // A failed add stops here, but what was added is still recorded
+        let created_branch = match git_worktree_add(&source, &dest, &branch, None) {
+            Ok(created) => created.is_some(),
+            Err(e) => {
+                failed = Some(e);
+                break;
+            }
+        };
         added.push(CreateRepoEntry {
             alias: spec.alias.clone(),
             path: dest.display().to_string(),
@@ -73,9 +128,16 @@ pub(crate) fn handle_add(args: AddArgs, verbose: bool, json: bool, strict: bool)
         });
     }
 
-    // Update centralized store
-    let new_repos: Vec<StoreRepoEntry> = added.iter().map(StoreRepoEntry::from).collect();
-    super::warn_store_error(store_extend_repos(&wt_dir, new_repos), strict)?;
+    // Record what was added (if anything), then report it, then any error:
+    // a failed add and a failed store write are both shown
+    let stored = if added.is_empty() {
+        Ok(())
+    } else {
+        let new_repos: Vec<StoreRepoEntry> = added.iter().map(StoreRepoEntry::from).collect();
+        store_extend_repos(&wt_dir, new_repos).with_context(|| {
+            format!("Added repos to worktree '{name}', but could not update the worktree store")
+        })
+    };
 
     if json {
         let output = AddOutput {
@@ -89,13 +151,17 @@ pub(crate) fn handle_add(args: AddArgs, verbose: bool, json: bool, strict: bool)
             println!(
                 "{} Added '{}' to worktree '{}' (branch: {}{})",
                 "✓".green(),
-                r.alias,
+                escape(&r.alias),
                 name,
-                r.branch,
+                escape(&r.branch),
                 branch_note
             );
         }
     }
 
-    Ok(())
+    match (failed, stored) {
+        (Some(e), Err(store)) => Err(e.context(format!("{store:#}"))),
+        (Some(e), Ok(())) => Err(e),
+        (None, stored) => stored,
+    }
 }

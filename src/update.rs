@@ -3,6 +3,7 @@ use crate::ssh_setup;
 use console::style;
 use indicatif::MultiProgress;
 use meta_core::config;
+use meta_core::display::{escape, escape_path};
 use meta_git_lib::clone_queue::CloneQueue;
 use meta_plugin_protocol::CommandResult;
 use std::collections::HashSet;
@@ -20,17 +21,19 @@ pub(crate) fn execute_git_update(
     // Build list of directories to check for .meta files
     let dirs_to_check: Vec<PathBuf> = if recursive {
         // In recursive mode, check each directory that has a .meta file
-        projects
-            .iter()
-            .map(|p| {
-                if p == "." {
-                    cwd.to_path_buf()
-                } else {
-                    cwd.join(p)
-                }
-            })
-            .filter(|path| config::find_meta_config_in(path).is_some())
-            .collect()
+        // A .meta that can't be examined is an error, not "no nested repos"
+        let mut dirs = Vec::new();
+        for p in projects {
+            let path = if p == "." {
+                cwd.to_path_buf()
+            } else {
+                cwd.join(p)
+            };
+            if config::find_meta_config_in(&path)?.is_some() {
+                dirs.push(path);
+            }
+        }
+        dirs
     } else {
         // Normal mode - just check current directory
         vec![cwd.to_path_buf()]
@@ -43,7 +46,7 @@ pub(crate) fn execute_git_update(
 
     // First pass: check for orphaned repos and warn user
     for dir in &dirs_to_check {
-        let Some((meta_path, _format)) = config::find_meta_config_in(dir) else {
+        let Some((meta_path, _format)) = config::find_meta_config_in(dir)? else {
             continue;
         };
 
@@ -69,11 +72,12 @@ pub(crate) fn execute_git_update(
                         } else {
                             dir.join(name).to_string_lossy().to_string()
                         };
+                        let shown = escape(&relative_path);
                         eprintln!(
                             "{} {} exists locally but is not in .meta. To remove: rm -rf {}",
                             style("⚠").yellow(),
-                            style(&relative_path).yellow().bold(),
-                            relative_path
+                            style(&shown).yellow().bold(),
+                            shown
                         );
                     }
                 }
@@ -107,7 +111,11 @@ pub(crate) fn execute_git_update(
         );
         let tasks = queue.drain_all();
         for task in tasks {
-            println!("  git clone {} {}", task.url, task.target_path.display());
+            println!(
+                "  git clone {} {}",
+                escape(&task.url),
+                escape_path(&task.target_path)
+            );
         }
         return Ok(CommandResult::Message(String::new()));
     }

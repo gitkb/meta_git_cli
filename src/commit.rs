@@ -1,5 +1,6 @@
 use console::style;
 use meta_core::config;
+use meta_core::display::{escape, escape_path};
 use meta_plugin_protocol::{CommandResult, PlannedCommand, PluginRequestOptions};
 use std::process::Command;
 
@@ -40,10 +41,10 @@ pub(crate) fn execute_git_commit(
         projects.to_vec()
     } else {
         // Fall back to reading local meta config
-        let Some((meta_path, _format)) = config::find_meta_config_in(cwd) else {
+        let Some((meta_path, _format)) = config::find_meta_config_in(cwd)? else {
             return Ok(CommandResult::Message(format!(
                 "No .meta config found in {}",
-                cwd.display()
+                escape_path(cwd)
             )));
         };
         let (projects, _) = config::parse_meta_config(&meta_path)?;
@@ -104,7 +105,7 @@ pub(crate) fn execute_git_commit(
         // No message provided, show what would be committed
         println!("Repositories with staged changes:");
         for (name, _path, files) in &repos_with_changes {
-            println!("  {} ({} files)", style(name).cyan(), files.len());
+            println!("  {} ({} files)", style(escape(name)).cyan(), files.len());
         }
         println!();
         println!(
@@ -172,12 +173,16 @@ fn execute_editor_commit(repos: &[(String, String, Vec<String>)]) -> anyhow::Res
         template.push_str("# Enter commit message above this line\n\n");
     }
 
-    // Write to temp file
-    let temp_dir = std::env::temp_dir();
-    let temp_file = temp_dir.join("META_COMMIT_EDITMSG");
-    let mut file = std::fs::File::create(&temp_file)?;
+    // Write to a new temp file (created exclusively, mode 0600, removed on
+    // drop) in meta's private data dir, never in a shared directory like /tmp
+    let mut file = tempfile::Builder::new()
+        .prefix("META_COMMIT_EDITMSG-")
+        .tempfile_in(meta_core::data_dir::data_subdir("tmp")?)?;
     file.write_all(template.as_bytes())?;
-    drop(file);
+    file.flush()?;
+    // Close it (some editors on Windows cannot replace an open file); the
+    // path is still removed on drop
+    let temp_file = file.into_temp_path();
 
     // Get editor from environment
     let editor = std::env::var("EDITOR")
@@ -195,8 +200,7 @@ fn execute_editor_commit(repos: &[(String, String, Vec<String>)]) -> anyhow::Res
     let content = std::fs::read_to_string(&temp_file)?;
     let commits = parse_multi_commit_file(&content);
 
-    // Clean up temp file
-    let _ = std::fs::remove_file(&temp_file);
+    drop(temp_file);
 
     if commits.is_empty() {
         println!("No commits to make (all messages were empty or deleted).");
@@ -218,7 +222,7 @@ fn execute_editor_commit(repos: &[(String, String, Vec<String>)]) -> anyhow::Res
         println!(
             "{} Committing {}...",
             style("→").cyan(),
-            style(repo_name).bold()
+            style(escape(repo_name)).bold()
         );
 
         let status = Command::new("git")
@@ -234,7 +238,7 @@ fn execute_editor_commit(repos: &[(String, String, Vec<String>)]) -> anyhow::Res
                 println!(
                     "  {} {}",
                     style("✓").green(),
-                    message.lines().next().unwrap_or("")
+                    escape(message.lines().next().unwrap_or(""))
                 );
                 succeeded += 1;
             }

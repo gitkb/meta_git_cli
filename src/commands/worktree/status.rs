@@ -1,5 +1,6 @@
 use anyhow::Result;
 use colored::*;
+use meta_core::display::escape;
 use rayon::prelude::*;
 
 use meta_git_lib::worktree::git_ops::*;
@@ -87,7 +88,10 @@ pub(crate) fn handle_status(args: StatusArgs, _verbose: bool, json: bool) -> Res
             };
             println!(
                 "  {} {:12} {:20} {}",
-                status_icon, s.alias, s.branch, detail_str
+                status_icon,
+                escape(&s.alias),
+                escape(&s.branch),
+                detail_str
             );
         }
     }

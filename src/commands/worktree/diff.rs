@@ -1,5 +1,6 @@
 use anyhow::Result;
 use colored::*;
+use meta_core::display::escape;
 use rayon::prelude::*;
 
 use meta_git_lib::worktree::git_ops::git_diff_stat;
@@ -65,7 +66,7 @@ pub(crate) fn handle_diff(args: DiffArgs, _verbose: bool, json: bool) -> Result<
                 let deletions = d.deletions;
                 println!(
                     "  {:12} {} {} ({} files)",
-                    d.alias,
+                    escape(&d.alias),
                     format!("+{insertions}").green(),
                     format!("-{deletions}").red(),
                     d.files_changed,

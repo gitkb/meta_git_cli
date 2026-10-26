@@ -235,7 +235,8 @@ fn eligible(
 /// `None` if there is no repository there (not cloned).
 fn repo_git_dir(repo: &Path) -> Result<Option<PathBuf>> {
     let dot_git = repo.join(".git");
-    let meta = match dot_git.symlink_metadata() {
+    // Links are followed: a `.git` linked to the real git directory is one
+    let meta = match std::fs::metadata(&dot_git) {
         Ok(meta) => meta,
         // A bare repository is its own git directory
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {

@@ -1328,3 +1328,36 @@ fn prune_leaves_a_gone_set_alone_while_one_of_its_worktrees_lives_on() {
     assert!(ws.join("a/.git/worktrees/a/meta-worktree.json").exists());
     assert!(moved.join("README").exists());
 }
+
+#[cfg(unix)]
+#[test]
+fn prune_finds_sets_of_a_repository_whose_git_dir_is_a_link() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let ws = workspace(root, &["a"]);
+    fs::rename(ws.join("a/.git"), root.join("a.git")).unwrap();
+    std::os::unix::fs::symlink(root.join("a.git"), ws.join("a/.git")).unwrap();
+    let elsewhere = root.join("elsewhere");
+    let out = meta_git_in(
+        root,
+        &ws,
+        "git worktree create",
+        &["t", "--repo", "a", "--no-deps", "--ttl", "0"],
+        json!({}),
+        Some(&elsewhere),
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    let out = meta_git(
+        root,
+        &ws,
+        "git worktree prune",
+        &[],
+        json!({"strict": true, "json_output": true}),
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["removed"][0]["name"], "t", "{report}");
+    assert_eq!(report["kept"], json!([]), "{report}");
+    assert!(!elsewhere.join("t").exists());
+}

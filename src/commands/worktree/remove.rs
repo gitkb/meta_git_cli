@@ -6,6 +6,7 @@ use meta_git_lib::worktree::helpers::*;
 use meta_git_lib::worktree::hooks::fire_post_destroy;
 use meta_git_lib::worktree::safety::{check_worktree_removal, delete_checked_set};
 use meta_git_lib::worktree::types::*;
+use meta_git_lib::worktree::workspace::Workspace;
 
 use super::cli_types::DestroyArgs;
 
@@ -14,8 +15,8 @@ pub(crate) fn handle_remove(args: DestroyArgs, verbose: bool, json: bool) -> Res
     validate_worktree_name(name)?;
     let force = args.force;
 
-    let meta_dir = find_meta_dir();
-    let worktree_root = resolve_worktree_root(meta_dir.as_deref())?;
+    let meta_dir = require_meta_dir()?;
+    let worktree_root = resolve_worktree_root(Some(&meta_dir))?;
     let wt_dir = worktree_set_dir(&worktree_root, name)?;
 
     if !wt_dir.exists() {
@@ -23,6 +24,18 @@ pub(crate) fn handle_remove(args: DestroyArgs, verbose: bool, json: bool) -> Res
     }
 
     let check = check_worktree_removal(&wt_dir)?;
+    // Only this workspace's sets: a shared worktree directory may hold
+    // another workspace's. No flag overrides this.
+    let workspace = Workspace::of(&meta_dir);
+    let foreign = workspace.foreign_members(&wt_dir, &check);
+    if !foreign.is_empty() {
+        anyhow::bail!(
+            "Refusing to remove worktree '{name}': it is not a set of this workspace ({}):\n  {}\n\
+             Remove it from the workspace that made it.",
+            escape_path(&workspace.root),
+            foreign.join("\n  ")
+        );
+    }
     if !check.blockers.is_empty() {
         anyhow::bail!(
             "Refusing to remove worktree '{name}':\n  {}\n\
@@ -62,7 +75,7 @@ pub(crate) fn handle_remove(args: DestroyArgs, verbose: bool, json: bool) -> Res
     delete_checked_set(&wt_dir, &check, force, verbose)?;
 
     // Fire post-destroy hook
-    fire_post_destroy(name, &wt_dir, force, meta_dir.as_deref());
+    fire_post_destroy(name, &wt_dir, force, Some(&meta_dir));
 
     if json {
         let output = DestroyOutput {

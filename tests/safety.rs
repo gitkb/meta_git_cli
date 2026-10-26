@@ -765,8 +765,8 @@ fn prune_keeps_a_worktree_it_cannot_inspect() {
         .iter()
         .filter_map(|e| e["name"].as_str())
         .collect();
-    // The set, found through its repository, and the root it couldn't list
-    assert_eq!(kept, [".worktrees", "x"], "{report}");
+    // The set, found through its repository (prune doesn't list the root)
+    assert_eq!(kept, ["x"], "{report}");
     assert!(ws.join(".worktrees/x/a/README").exists());
 }
 

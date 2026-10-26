@@ -114,18 +114,28 @@ pub(crate) fn handle_create(
 
     // Determine which repos to include: Vec<(alias, source_path, branch)>
     let repos_to_create: Vec<(String, std::path::PathBuf, String)> = if use_all {
-        projects
+        let mut all: Vec<(String, std::path::PathBuf)> = projects
             .iter()
-            .map(|p| {
+            .filter(|p| !recursive || p.name == ".")
+            .map(|p| (p.name.clone(), meta_dir.join(&p.path)))
+            .collect();
+        // --recursive: every repo of the nested tree, by its full path
+        if recursive {
+            let tree = meta_core::config::walk_meta_tree(&meta_dir, None)?;
+            all.extend(
+                meta_core::config::build_project_map(&tree, &meta_dir, "")
+                    .into_iter()
+                    .map(|(alias, (source, _))| (alias, source)),
+            );
+        }
+        all.into_iter()
+            .map(|(alias, source)| {
                 let per_branch = repo_specs
                     .iter()
-                    .find(|r| r.alias == p.name)
+                    .find(|r| r.alias == alias)
                     .and_then(|r| r.branch.as_deref());
-                (
-                    p.name.clone(),
-                    meta_dir.join(&p.path),
-                    resolve_branch(name, branch_flag, per_branch),
-                )
+                let branch = resolve_branch(name, branch_flag, per_branch);
+                (alias, source, branch)
             })
             .collect()
     } else if no_deps {
@@ -428,9 +438,9 @@ fn journal_new_branch(
 
 /// Undo a failed create: delete the set this call claimed, if the removal
 /// check finds nothing to lose, and the branches it created, if they still
-/// point where it left them. A record that can't be used (one whose write
-/// failed, say) doesn't stop it: this call made the set, so it needs no
-/// proof of that. Returns the error to report.
+/// point where it left them. A record that can't be used or is missing (one
+/// whose write failed, say) doesn't stop it: this call made the set, so it
+/// needs no proof of that. Returns the error to report.
 fn roll_back(
     wt_dir: &std::path::Path,
     new_branches: &[(std::path::PathBuf, String, String)],
@@ -440,7 +450,7 @@ fn roll_back(
         let blockers = check
             .blockers
             .iter()
-            .filter(|b| !check.unusable_records.contains(b));
+            .filter(|b| !check.unusable_records.contains(b) && !check.missing_records.contains(b));
         let problems: Vec<String> = blockers.chain(&check.unsaved).cloned().collect();
         anyhow::ensure!(problems.is_empty(), "{}", problems.join("; "));
         delete_checked_set(wt_dir, &check, false, false)
@@ -893,6 +903,40 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&out.stderr)
         );
+    }
+
+    #[test]
+    fn roll_back_deletes_a_set_whose_records_were_not_all_written() {
+        let tmp = tempfile::tempdir().unwrap();
+        let set = tmp.path().join("set");
+        for (repo, wt) in [("root", set.clone()), ("leaf", set.join("leaf"))] {
+            let source = tmp.path().join(repo);
+            std::fs::create_dir(&source).unwrap();
+            git(&source, &["init", "-q"]);
+            git(&source, &["commit", "-q", "--allow-empty", "-m", "init"]);
+            git(
+                &source,
+                &["worktree", "add", "-q", "-b", repo, wt.to_str().unwrap()],
+            );
+        }
+        // The root was recorded; the leaf's record write failed
+        let set_record = SetRecord {
+            set: set.canonicalize().unwrap(),
+            project: tmp.path().to_path_buf(),
+            created_at: Utc::now().to_rfc3339(),
+            ephemeral: false,
+            ttl_seconds: None,
+            custom: HashMap::new(),
+        };
+        record::write(&linked_worktree_admin_dir(&set).unwrap(), &set_record).unwrap();
+        assert_eq!(
+            check_worktree_removal(&set).unwrap().missing_records.len(),
+            1
+        );
+
+        let err = roll_back(&set, &[], anyhow::anyhow!("record write failed"));
+        assert_eq!(format!("{err:#}"), "record write failed");
+        assert!(!set.exists());
     }
 
     #[test]

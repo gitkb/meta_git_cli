@@ -39,8 +39,18 @@ pub(crate) fn handle_add(args: AddArgs, verbose: bool, json: bool) -> Result<()>
     // added would leave those out of the store
     let mut planned = Vec::new();
     for (i, spec) in repo_specs.iter().enumerate() {
-        if repo_specs.iter().take(i).any(|o| o.alias == spec.alias) {
-            anyhow::bail!("Repo '{}' is given twice", escape(&spec.alias));
+        // As in create: a repeat is one worktree, a repeat on another branch
+        // is refused
+        if let Some(first) = repo_specs.iter().take(i).find(|o| o.alias == spec.alias) {
+            if first.branch != spec.branch {
+                anyhow::bail!(
+                    "Repo '{}' is given twice, on branches '{}' and '{}'",
+                    escape(&spec.alias),
+                    escape(first.branch.as_deref().unwrap_or("(default)")),
+                    escape(spec.branch.as_deref().unwrap_or("(default)"))
+                );
+            }
+            continue;
         }
         if existing.iter().any(|r| r.alias == spec.alias) {
             anyhow::bail!(
@@ -70,6 +80,15 @@ pub(crate) fn handle_add(args: AddArgs, verbose: bool, json: bool) -> Result<()>
     let mut failed = None;
     for (spec, source, dest) in planned {
         let branch = resolve_branch(name, None, spec.branch.as_deref());
+        // Again now: a checkout added above (a parent repo's) may have put a
+        // symlink where this one goes
+        if let Err(why) = meta_core::config::resolve_inside(&wt_dir, &spec.alias) {
+            failed = Some(anyhow::anyhow!(
+                "Refusing to add the worktree for '{}': {why}",
+                escape(&spec.alias)
+            ));
+            break;
+        }
 
         // Ensure parent directories exist for nested paths (e.g., "vendor/")
         if let Some(parent) = dest.parent() {

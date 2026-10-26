@@ -216,7 +216,7 @@ fn write_worktree_help(w: &mut dyn std::io::Write) {
         w,
         "  --ttl <DURATION>         Time-to-live (30s, 5m, 1h, 2d, 1w)"
     );
-    let _ = writeln!(w, "  --meta <KEY=VALUE>       Store custom metadata");
+    let _ = writeln!(w, "  --meta <KEY=VALUE>       Record custom metadata");
     let _ = writeln!(w);
     let _ = writeln!(w, "LIST / STATUS OPTIONS:");
     let _ = writeln!(

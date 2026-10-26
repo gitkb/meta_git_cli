@@ -61,7 +61,7 @@ fn workspace(root: &Path, projects: &[&str]) -> std::path::PathBuf {
     ws
 }
 
-/// Invoke the plugin protocol in `cwd` with an isolated store under `root/data`.
+/// Invoke the plugin protocol in `cwd` with an isolated meta data dir under `root/data`.
 fn meta_git(root: &Path, cwd: &Path, command: &str, args: &[&str], options: Value) -> Output {
     meta_git_in(root, cwd, command, args, options, None)
 }
@@ -125,17 +125,27 @@ fn remove_refuses_directories_meta_did_not_create() {
     assert!(stderr(&out).contains("no record"), "{}", stderr(&out));
     assert!(ws.join(".worktrees/notawt/data").exists());
 
+    // A worktree made with git, not meta, carries no record of meta making it.
+    git(
+        &ws.join("a"),
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "byhand",
+            "../.worktrees/byhand",
+        ],
+    );
+    let out = worktree(root, &ws, &["remove", "byhand", "--force"]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("no record"), "{}", stderr(&out));
+    assert!(ws.join(".worktrees/byhand/README").exists());
+
     // worktrees_dir "." would make the primary clone `a` look like a worktree.
-    // Such a config is refused, so even with a forged store record the
-    // primary checkout is never deleted.
+    // Such a config is refused, so the primary checkout is never deleted.
     let config = json!({"worktrees_dir": ".", "projects": {"a": "unused"}});
     fs::write(ws.join(".meta"), config.to_string()).unwrap();
-    let key = ws.join("a").canonicalize().unwrap();
-    let store = json!({"worktrees": {key.to_str().unwrap(): {
-        "name": "a", "project": ws, "created_at": "2026-01-01T00:00:00Z",
-        "ephemeral": false, "ttl_seconds": null, "repos": [], "custom": {}}}});
-    fs::create_dir_all(root.join("data")).unwrap();
-    fs::write(root.join("data/worktree.json"), store.to_string()).unwrap();
     let out = worktree(root, &ws, &["remove", "a", "--force"]);
     assert!(!out.status.success());
     assert!(
@@ -146,8 +156,8 @@ fn remove_refuses_directories_meta_did_not_create() {
     assert!(ws.join("a/README").exists());
 
     // META_WORKTREES may point anywhere, the workspace root included: there
-    // the primary clone `a` looks like a set, and the forged record would
-    // remove it. The removal check refuses a primary checkout.
+    // the primary clone `a` looks like a set. The removal check refuses a
+    // primary checkout.
     fs::write(
         ws.join(".meta"),
         json!({"projects": {"a": "unused"}}).to_string(),
@@ -638,7 +648,7 @@ fn a_set_holding_another_recorded_set_is_not_deleted() {
 
 #[cfg(unix)]
 #[test]
-fn prune_keeps_a_dangling_link_at_a_recorded_path() {
+fn prune_leaves_a_dangling_link_at_a_set_path() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
     let ws = workspace(root, &["a"]);
@@ -667,14 +677,16 @@ fn prune_keeps_a_dangling_link_at_a_recorded_path() {
         json!({"json_output": true}),
     );
     assert!(out.status.success(), "{}", stderr(&out));
+    // git deleted the set's records with its worktree, so nothing names the
+    // link as a set, and prune leaves it alone
     let report: Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(report["kept"][0]["name"], "gone", "{report}");
+    assert_eq!(report["removed"], json!([]), "{report}");
     assert!(set.symlink_metadata().is_ok());
 }
 
 #[cfg(unix)]
 #[test]
-fn remove_drops_the_record_when_the_worktrees_dir_is_a_link() {
+fn remove_works_when_the_worktrees_dir_is_a_link() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
     let ws = workspace(root, &["a"]);
@@ -689,10 +701,10 @@ fn remove_drops_the_record_when_the_worktrees_dir_is_a_link() {
     assert!(out.status.success(), "{}", stderr(&out));
     let out = worktree(root, &ws, &["remove", "t"]);
     assert!(out.status.success(), "{}", stderr(&out));
-    let store: Value =
-        serde_json::from_str(&fs::read_to_string(root.join("data/worktree.json")).unwrap())
-            .unwrap();
-    assert_eq!(store["worktrees"], json!({}), "the record is gone");
+    assert!(!ws.join("link/t").exists());
+    // git deleted the worktree's admin directory, and its record with it
+    let admins = fs::read_dir(ws.join("a/.git/worktrees")).map_or(0, |d| d.count());
+    assert_eq!(admins, 0);
 }
 
 #[cfg(unix)]
@@ -768,4 +780,86 @@ fn rollback_keeps_a_branch_a_checkout_hook_committed_on() {
         .output()
         .unwrap();
     assert_eq!(String::from_utf8_lossy(&log.stdout).trim(), "hook");
+}
+
+#[test]
+fn records_live_beside_git_and_no_store_is_written() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let ws = workspace(root, &["a", "b"]);
+    let args = ["create", "t", "--repo", "a", "--no-deps", "--ttl", "1h"];
+    let out = meta_git(
+        root,
+        &ws,
+        "git worktree create",
+        &[&args[1..], &["--meta", "k=v"]].concat(),
+        json!({}),
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(!root.join("data/worktree.json").exists());
+    let read = |repo: &str| -> Value {
+        let path = ws
+            .join(repo)
+            .join(".git/worktrees")
+            .join(repo)
+            .join("meta-worktree.json");
+        serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
+    };
+    let record = read("a");
+    let set = ws.join(".worktrees/t").canonicalize().unwrap();
+    assert_eq!(record["set"], json!(set), "{record}");
+    assert_eq!(record["ttl_seconds"], 3600, "{record}");
+    assert_eq!(record["custom"], json!({"k": "v"}), "{record}");
+
+    // A repo added later joins the same record
+    let out = worktree(root, &ws, &["add", "t", "--repo", "b"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(read("b"), record);
+
+    let out = meta_git(
+        root,
+        &ws,
+        "git worktree list",
+        &[],
+        json!({"json_output": true}),
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    let list: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let entry = &list["worktrees"][0];
+    assert_eq!(entry["custom"], json!({"k": "v"}), "{list}");
+    assert!(
+        entry["ttl_remaining_seconds"].as_i64().unwrap() > 3000,
+        "{list}"
+    );
+
+    // A set whose directory is gone loses only meta's records; git's own
+    // entries stay for `git worktree prune`
+    fs::remove_dir_all(ws.join(".worktrees/t")).unwrap();
+    let out = meta_git(
+        root,
+        &ws,
+        "git worktree prune",
+        &[],
+        json!({"json_output": true}),
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["removed"][0]["name"], "t", "{report}");
+    assert_eq!(
+        report["removed"][0]["reason"],
+        "orphaned (missing directory)"
+    );
+    for repo in ["a", "b"] {
+        let admin = ws.join(repo).join(".git/worktrees").join(repo);
+        assert!(admin.is_dir() && !admin.join("meta-worktree.json").exists());
+    }
+    let out = meta_git(
+        root,
+        &ws,
+        "git worktree prune",
+        &[],
+        json!({"json_output": true}),
+    );
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["removed"], json!([]), "{report}");
 }

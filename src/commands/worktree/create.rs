@@ -8,11 +8,11 @@ use meta_cli::dependency_graph::{DependencyGraph, ProjectDependencies};
 use meta_git_lib::worktree::git_ops::*;
 use meta_git_lib::worktree::helpers::*;
 use meta_git_lib::worktree::hooks::fire_post_create;
-use meta_git_lib::worktree::safety::{check_worktree_removal, delete_checked_set};
-use meta_git_lib::worktree::store::store_add;
-use meta_git_lib::worktree::types::{
-    CreateOutput, CreateRepoEntry, StoreRepoEntry, WorktreeStoreEntry,
+use meta_git_lib::worktree::record::{self, SetRecord};
+use meta_git_lib::worktree::safety::{
+    check_worktree_removal, delete_checked_set, linked_worktree_admin_dir,
 };
+use meta_git_lib::worktree::types::{CreateOutput, CreateRepoEntry};
 
 use super::cli_types::CreateArgs;
 use crate::helpers::shell_quote;
@@ -220,6 +220,24 @@ pub(crate) fn handle_create(
     let mut created_repos = Vec::new();
     let mut new_branches = Vec::new();
     let built = (|| -> Result<()> {
+        // Each worktree gets this record as soon as it exists, so `remove`
+        // and `prune` know meta made it; a worktree that can't be recorded
+        // is a failed create.
+        let set_record = SetRecord {
+            set: wt_dir
+                .canonicalize()
+                .with_context(|| format!("Cannot resolve {}", escape_path(&wt_dir)))?,
+            project: meta_dir.clone(),
+            created_at: Utc::now().to_rfc3339(),
+            ephemeral,
+            ttl_seconds,
+            custom: custom_meta.clone(),
+        };
+        let mark = |checkout: &std::path::Path| {
+            linked_worktree_admin_dir(checkout)
+                .and_then(|admin| record::write(&admin, &set_record))
+                .with_context(|| format!("Cannot record the worktree {}", escape_path(checkout)))
+        };
         // If "." is included, create it first (it becomes the worktree root;
         // git accepts the empty directory claimed above).
         if let Some((_, source, branch)) = repos_to_create.iter().find(|(a, _, _)| a == ".") {
@@ -237,6 +255,7 @@ pub(crate) fn handle_create(
                 let created_branch = journal_new_branch(source, branch, &mut new_branches, || {
                     git_worktree_add(source, &wt_dir, branch, from_ref)
                 })?;
+                mark(&wt_dir)?;
                 created_repos.push(CreateRepoEntry {
                     alias: ".".to_string(),
                     path: wt_dir.display().to_string(),
@@ -291,6 +310,7 @@ pub(crate) fn handle_create(
             let created_branch = journal_new_branch(source, branch, &mut new_branches, || {
                 git_worktree_add(source, &dest, branch, from_ref)
             })?;
+            mark(&dest)?;
             created_repos.push(CreateRepoEntry {
                 alias: alias.clone(),
                 path: dest.display().to_string(),
@@ -312,21 +332,7 @@ pub(crate) fn handle_create(
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or(".worktrees");
-        ensure_worktrees_in_gitignore(&meta_dir, dirname, json)?;
-
-        // Add to centralized store
-        let store_entry = WorktreeStoreEntry {
-            name: name.to_string(),
-            project: meta_dir.to_string_lossy().to_string(),
-            created_at: Utc::now().to_rfc3339(),
-            ephemeral,
-            ttl_seconds,
-            repos: created_repos.iter().map(StoreRepoEntry::from).collect(),
-            custom: custom_meta.clone(),
-        };
-        // `remove` and `prune` delete only recorded worktrees, so an unrecorded one
-        // would be stranded: failing to record is a failed create.
-        store_add(&wt_dir, store_entry).context("Cannot record the new worktree")
+        ensure_worktrees_in_gitignore(&meta_dir, dirname, json)
     })();
     built.map_err(|e| roll_back(&wt_dir, &new_branches, e))?;
 
@@ -532,7 +538,7 @@ fn print_create_dry_run(plan: &CreateDryRunPlan<'_>) {
     }
 
     println!();
-    println!("No directories, branches, store entries, hooks, or .gitignore changes were written.");
+    println!("No directories, branches, records, hooks, or .gitignore changes were written.");
 }
 
 /// Resolve repos with automatic dependency resolution.

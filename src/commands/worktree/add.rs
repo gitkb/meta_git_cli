@@ -1,11 +1,12 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use colored::*;
 use meta_core::display::{escape, escape_path};
 
 use meta_cli::worktree::discover_worktree_repos;
 use meta_git_lib::worktree::git_ops::git_worktree_add;
 use meta_git_lib::worktree::helpers::*;
-use meta_git_lib::worktree::store::store_extend_repos;
+use meta_git_lib::worktree::record;
+use meta_git_lib::worktree::safety::linked_worktree_admin_dir;
 use meta_git_lib::worktree::types::*;
 
 use super::cli_types::AddArgs;
@@ -35,8 +36,12 @@ pub(crate) fn handle_add(args: AddArgs, verbose: bool, json: bool) -> Result<()>
     // Check existing repos in the worktree
     let existing = discover_worktree_repos(&wt_dir)?;
 
+    // What is added joins the set's record, if meta made the set; one it
+    // didn't make stays unrecorded, so `remove` keeps refusing it.
+    let set_record = record::find(&wt_dir, existing.iter().map(|r| &r.path));
+
     // Check every repo before adding any: one refused after others were
-    // added would leave those out of the store
+    // added would leave a set the caller didn't ask for
     let mut planned = Vec::new();
     for (i, spec) in repo_specs.iter().enumerate() {
         // As in create: a repeat is one worktree, a repeat on another branch
@@ -112,7 +117,7 @@ pub(crate) fn handle_add(args: AddArgs, verbose: bool, json: bool) -> Result<()>
             );
         }
 
-        // A failed add stops here, but what was added is still recorded
+        // A failed add stops here; what was added is reported
         let created_branch = match git_worktree_add(&source, &dest, &branch, None) {
             Ok(created) => created.is_some(),
             Err(e) => {
@@ -126,18 +131,18 @@ pub(crate) fn handle_add(args: AddArgs, verbose: bool, json: bool) -> Result<()>
             branch,
             created_branch,
         });
+        if let Some(set_record) = &set_record {
+            if let Err(e) =
+                linked_worktree_admin_dir(&dest).and_then(|admin| record::write(&admin, set_record))
+            {
+                failed = Some(e.context(format!(
+                    "Added '{}', but cannot record it in worktree '{name}'",
+                    escape(&spec.alias)
+                )));
+                break;
+            }
+        }
     }
-
-    // Record what was added (if anything), then report it, then any error:
-    // a failed add and a failed store write are both shown
-    let stored = if added.is_empty() {
-        Ok(())
-    } else {
-        let new_repos: Vec<StoreRepoEntry> = added.iter().map(StoreRepoEntry::from).collect();
-        store_extend_repos(&wt_dir, new_repos).with_context(|| {
-            format!("Added repos to worktree '{name}', but could not update the worktree store")
-        })
-    };
 
     if json {
         let output = AddOutput {
@@ -159,9 +164,5 @@ pub(crate) fn handle_add(args: AddArgs, verbose: bool, json: bool) -> Result<()>
         }
     }
 
-    match (failed, stored) {
-        (Some(e), Err(store)) => Err(e.context(format!("{store:#}"))),
-        (Some(e), Ok(())) => Err(e),
-        (None, stored) => stored,
-    }
+    failed.map_or(Ok(()), Err)
 }

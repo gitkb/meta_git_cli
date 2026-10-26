@@ -12,7 +12,7 @@ use meta_cli::worktree::{
 };
 use meta_git_lib::worktree::git_ops::git_status_summary;
 use meta_git_lib::worktree::helpers::*;
-use meta_git_lib::worktree::store::{entry_ttl_remaining, store_list};
+use meta_git_lib::worktree::record::{self, SetRecord};
 use meta_git_lib::worktree::types::ListRepoEntry;
 
 use super::cli_types::ListArgs;
@@ -53,14 +53,23 @@ enum RepoEntry {
     Metadata(WorktreeMemberInfo),
 }
 
-fn repo_entries(path: &std::path::Path, args: &ListArgs, selected: bool) -> Result<Vec<RepoEntry>> {
+/// The set's repos, and meta's record of creating it if it has one.
+fn repo_entries(
+    path: &std::path::Path,
+    args: &ListArgs,
+    selected: bool,
+) -> Result<(Vec<RepoEntry>, Option<SetRecord>)> {
     if args.metadata_only {
         let members = if args.recursive {
             discover_worktree_members_recursive(path)?
         } else {
             discover_worktree_members(path)?
         };
-        return Ok(members.into_iter().map(RepoEntry::Metadata).collect());
+        let record = record::find(path, members.iter().map(|m| &m.path));
+        return Ok((
+            members.into_iter().map(RepoEntry::Metadata).collect(),
+            record,
+        ));
     }
     let repos = if args.recursive {
         discover_worktree_repos_recursive(path)?
@@ -69,7 +78,8 @@ fn repo_entries(path: &std::path::Path, args: &ListArgs, selected: bool) -> Resu
     } else {
         discover_worktree_repos(path).unwrap_or_default()
     };
-    repos
+    let record = record::find(path, repos.iter().map(|r| &r.path));
+    let entries = repos
         .par_iter()
         .map(|repo| {
             let status = git_status_summary(&repo.path);
@@ -84,7 +94,8 @@ fn repo_entries(path: &std::path::Path, args: &ListArgs, selected: bool) -> Resu
                 dirty,
             }))
         })
-        .collect()
+        .collect::<Result<_>>()?;
+    Ok((entries, record))
 }
 
 /// A selected set fails closed. All-set listing retains healthy sets and warnings.
@@ -153,20 +164,11 @@ pub(crate) fn handle_list(
         }
         sets
     };
-    // Listing still works without the store (no TTL or ephemeral marks), but
-    // say why it is missing
-    let store_data = store_list().unwrap_or_else(|e| {
-        eprintln!(
-            "warning: not using the worktree store: {}",
-            meta_core::display::escape_lines(&format!("{e:#}"))
-        );
-        Default::default()
-    });
     let now = Utc::now().timestamp();
     let results: Vec<Result<Option<ListEntry>>> = sets
         .par_iter()
         .map(|(name, path)| {
-            let repos = repo_entries(path, &args, is_selected)?;
+            let (repos, record) = repo_entries(path, &args, is_selected)?;
             if repos.is_empty() {
                 anyhow::ensure!(!is_selected, "No repos found in worktree '{name}'");
                 return Ok(None);
@@ -175,17 +177,13 @@ pub(crate) fn handle_list(
                 RepoEntry::Observed(repo) => repo.alias == ".",
                 RepoEntry::Metadata(repo) => repo.alias == ".",
             });
-            let (ephemeral, ttl_remaining_seconds, custom) = if let Some(entry) = store_data
-                .worktrees
-                .get(&path.to_string_lossy().to_string())
-            {
-                (
-                    Some(entry.ephemeral),
-                    entry_ttl_remaining(entry, now),
-                    (!entry.custom.is_empty()).then(|| entry.custom.clone()),
-                )
-            } else {
-                (None, None, None)
+            let (ephemeral, ttl_remaining_seconds, custom) = match record {
+                Some(record) => (
+                    Some(record.ephemeral),
+                    record.ttl_remaining(now),
+                    (!record.custom.is_empty()).then_some(record.custom),
+                ),
+                None => (None, None, None),
             };
             Ok(Some(ListEntry {
                 name: name.clone(),

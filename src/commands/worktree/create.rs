@@ -67,26 +67,6 @@ pub(crate) fn handle_create(
     if repo_specs.is_empty() && !use_all {
         anyhow::bail!("Specify repos with --repo <alias> or use --all");
     }
-    // A repeated --repo is one worktree; two branches for it cannot both be
-    // checked out there, and keeping one would drop the other unnoticed
-    for (i, spec) in repo_specs.iter().enumerate() {
-        let other = repo_specs
-            .iter()
-            .skip(i + 1)
-            .find(|o| o.alias == spec.alias && o.branch != spec.branch);
-        if let Some(other) = other {
-            let branch = |s: &meta_git_lib::worktree::RepoSpec| {
-                escape(s.branch.as_deref().unwrap_or("(default)")).into_owned()
-            };
-            anyhow::bail!(
-                "Repo '{}' is given twice, on branches '{}' and '{}'",
-                escape(&spec.alias),
-                branch(spec),
-                branch(other)
-            );
-        }
-    }
-
     let nearest_meta_dir = require_meta_dir()?;
     let meta_dir = if recursive {
         meta_core::config::find_root_meta_dir(&nearest_meta_dir)
@@ -630,13 +610,25 @@ fn resolve_repos_with_dependencies(
 
     // Precompute a mapping from resolved alias to per-repo branch so we avoid
     // repeated graph scans inside the per-repo loop below.
-    let resolved_branch_map: HashMap<String, Option<&str>> = repo_specs
-        .iter()
-        .filter_map(|r| {
-            let resolved = resolve_alias_in_graph(&graph, &r.alias).ok()?;
-            Some((resolved, r.branch.as_deref()))
-        })
-        .collect();
+    // Two specs naming one repo (say `core` and `group/core`) on different
+    // branches can't both be honoured: refuse rather than keep one.
+    let mut resolved_branch_map: HashMap<String, Option<&str>> = HashMap::new();
+    for spec in repo_specs {
+        let Ok(resolved) = resolve_alias_in_graph(&graph, &spec.alias) else {
+            continue;
+        };
+        let branch = spec.branch.as_deref();
+        if let Some(first) = resolved_branch_map.insert(resolved.clone(), branch) {
+            if first != branch {
+                anyhow::bail!(
+                    "Repo '{}' is given twice, on branches '{}' and '{}'",
+                    escape(&resolved),
+                    escape(first.unwrap_or("(default)")),
+                    escape(branch.unwrap_or("(default)"))
+                );
+            }
+        }
+    }
 
     // Add other repos
     for alias in &repos_to_include {

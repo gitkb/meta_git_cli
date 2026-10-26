@@ -178,7 +178,11 @@ fn clone_single_repo(
         ));
         // Still mark as completed and check for nested .meta
         if let Err(e) = queue.mark_completed(task) {
-            debug!("Failed to check nested .meta for {}: {}", task.name, e);
+            debug!(
+                "Failed to check nested .meta for {}: {}",
+                task.name,
+                meta_core::display::escape_lines(&format!("{e:#}"))
+            );
             record(e);
         }
         return;

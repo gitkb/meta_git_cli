@@ -35,8 +35,9 @@ pub(crate) fn handle_add(args: AddArgs, verbose: bool, json: bool) -> Result<()>
     // Check existing repos in the worktree
     let existing = discover_worktree_repos(&wt_dir)?;
 
-    // A repo given twice can't be added twice: refuse before adding anything,
-    // or the first add would be left out of the store
+    // Check every repo before adding any: one refused after others were
+    // added would leave those out of the store
+    let mut planned = Vec::new();
     for (i, spec) in repo_specs.iter().enumerate() {
         if repo_specs.iter().take(i).any(|o| o.alias == spec.alias) {
             anyhow::bail!("Repo '{}' is given twice", escape(&spec.alias));
@@ -47,14 +48,10 @@ pub(crate) fn handle_add(args: AddArgs, verbose: bool, json: bool) -> Result<()>
                 escape(&spec.alias)
             );
         }
-    }
 
-    let mut added = Vec::new();
-    for spec in repo_specs {
         // Use recursive lookup for nested paths (containing '/')
         let (source, _project) = lookup_nested_project(&meta_dir, &spec.alias)?;
 
-        let branch = resolve_branch(name, None, spec.branch.as_deref());
         // Preserve the full alias as the destination path so that relative
         // references (e.g., Cargo.toml workspace members) remain valid.
         let dest = wt_dir.join(&spec.alias);
@@ -66,6 +63,13 @@ pub(crate) fn handle_add(args: AddArgs, verbose: bool, json: bool) -> Result<()>
                 escape(&spec.alias)
             )
         })?;
+        planned.push((spec, source, dest));
+    }
+
+    let mut added = Vec::new();
+    let mut failed = None;
+    for (spec, source, dest) in planned {
+        let branch = resolve_branch(name, None, spec.branch.as_deref());
 
         // Ensure parent directories exist for nested paths (e.g., "vendor/")
         if let Some(parent) = dest.parent() {
@@ -83,7 +87,14 @@ pub(crate) fn handle_add(args: AddArgs, verbose: bool, json: bool) -> Result<()>
             );
         }
 
-        let created_branch = git_worktree_add(&source, &dest, &branch, None)?.is_some();
+        // A failed add stops here, but what was added is still recorded
+        let created_branch = match git_worktree_add(&source, &dest, &branch, None) {
+            Ok(created) => created.is_some(),
+            Err(e) => {
+                failed = Some(e);
+                break;
+            }
+        };
         added.push(CreateRepoEntry {
             alias: spec.alias.clone(),
             path: dest.display().to_string(),
@@ -97,6 +108,9 @@ pub(crate) fn handle_add(args: AddArgs, verbose: bool, json: bool) -> Result<()>
     store_extend_repos(&wt_dir, new_repos).with_context(|| {
         format!("Added repos to worktree '{name}', but could not update the worktree store")
     })?;
+    if let Some(e) = failed {
+        return Err(e);
+    }
 
     if json {
         let output = AddOutput {

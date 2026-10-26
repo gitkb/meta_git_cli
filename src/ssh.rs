@@ -100,9 +100,9 @@ pub(crate) fn warn_remote_mismatches(cwd: &Path) {
     eprintln!("  Fix manually with:");
     for m in &mismatches {
         eprintln!(
-            "    git -C '{}' remote set-url origin '{}'",
-            escape(&m.path),
-            escape(&m.expected)
+            "    git -C {} remote set-url origin {}",
+            escape(&crate::helpers::shell_quote(&m.path)),
+            escape(&crate::helpers::shell_quote(&m.expected))
         );
     }
 }

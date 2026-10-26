@@ -28,3 +28,16 @@ pub(crate) fn get_project_directories(cwd: &Path) -> anyhow::Result<Vec<String>>
     dirs.extend(paths);
     Ok(dirs)
 }
+
+/// `value` quoted for a POSIX shell, for commands meta prints for the user
+/// to paste: plain words stay as they are.
+pub(crate) fn shell_quote(value: &str) -> String {
+    if value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | ':'))
+    {
+        value.to_string()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
+}

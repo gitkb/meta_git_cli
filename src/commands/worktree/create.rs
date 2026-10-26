@@ -15,6 +15,7 @@ use meta_git_lib::worktree::types::{
 };
 
 use super::cli_types::CreateArgs;
+use crate::helpers::shell_quote;
 
 pub(crate) fn handle_create(
     args: CreateArgs,
@@ -532,17 +533,6 @@ fn print_create_dry_run(plan: &CreateDryRunPlan<'_>) {
 
     println!();
     println!("No directories, branches, store entries, hooks, or .gitignore changes were written.");
-}
-
-fn shell_quote(value: &str) -> String {
-    if value
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | ':'))
-    {
-        value.to_string()
-    } else {
-        format!("'{}'", value.replace('\'', "'\\''"))
-    }
 }
 
 /// Resolve repos with automatic dependency resolution.

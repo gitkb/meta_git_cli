@@ -1,7 +1,7 @@
 use anyhow::Result;
 use colored::*;
 use meta_core::display::escape_lines;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use meta_cli::repo_filter;
 use meta_cli::worktree::{discover_worktree_repos, WorktreeRepoInfo};
@@ -23,23 +23,20 @@ fn build_loop_config(
 ) -> Result<loop_lib::LoopConfig> {
     let directories: Vec<String> = repos.iter().map(|r| r.path.display().to_string()).collect();
     // A set lays its repos out as the workspace, so the set's config names
-    // them, by project name or path; a set without its root has the config
-    // of the workspace it was made from
-    let config_dir = match meta_core::config::find_meta_config_in(wt_dir)? {
-        Some(_) => Some(wt_dir.to_path_buf()),
-        None => repos
-            .iter()
-            .find_map(|r| meta_core::config::recorded_project(&r.path)),
+    // them, by project name or path; only a filter reads it
+    let names = if include_filters.is_empty() && exclude_filters.is_empty() {
+        Vec::new()
+    } else {
+        let paths: Vec<PathBuf> = repos.iter().map(|r| r.path.clone()).collect();
+        match meta_cli::worktree::set_config(wt_dir, &paths, None)? {
+            Some((config, _)) => {
+                let (projects, _) = meta_core::config::parse_meta_config(&config)?;
+                let tree = meta_core::config::walk_projects(wt_dir, &projects, None)?;
+                repo_filter::repo_names(wt_dir, &projects, &tree)
+            }
+            None => Vec::new(),
+        }
     };
-    let config = match &config_dir {
-        Some(dir) => meta_core::config::find_meta_config_in(dir)?,
-        None => None,
-    };
-    let names: Vec<(String, String)> = config
-        .map(|(config, _)| meta_core::config::parse_meta_config(&config))
-        .transpose()?
-        .map(|(projects, _)| projects.into_iter().map(|p| (p.name, p.path)).collect())
-        .unwrap_or_default();
     let directories = repo_filter::select(
         &include_filters,
         &exclude_filters,

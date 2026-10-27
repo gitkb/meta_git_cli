@@ -30,7 +30,11 @@ pub(crate) fn handle_add(args: AddArgs, verbose: bool, json: bool) -> Result<()>
     let wt_dir = worktree_set_dir(&worktree_root, name)?;
 
     if !wt_dir.exists() {
-        anyhow::bail!("Worktree '{}' not found at {}", name, escape_path(&wt_dir));
+        anyhow::bail!(
+            "Worktree '{}' not found at {}",
+            escape(name),
+            escape_path(&wt_dir)
+        );
     }
 
     // Check existing repos in the worktree
@@ -42,57 +46,62 @@ pub(crate) fn handle_add(args: AddArgs, verbose: bool, json: bool) -> Result<()>
 
     // Check every repo before adding any: one refused after others were
     // added would leave a set the caller didn't ask for
-    let mut planned = Vec::new();
-    for (i, spec) in repo_specs.iter().enumerate() {
-        // As in create: a repeat is one worktree, a repeat on another branch
-        // is refused
-        if let Some(first) = repo_specs.iter().take(i).find(|o| o.alias == spec.alias) {
-            if first.branch != spec.branch {
-                anyhow::bail!(
-                    "Repo '{}' is given twice, on branches '{}' and '{}'",
-                    escape(&spec.alias),
-                    escape(first.branch.as_deref().unwrap_or("(default)")),
-                    escape(spec.branch.as_deref().unwrap_or("(default)"))
-                );
-            }
-            continue;
-        }
+    let mut planned: Vec<(&RepoSpec, std::path::PathBuf, String)> = Vec::new();
+    for spec in repo_specs {
         // Use recursive lookup for nested paths (containing '/')
         let (source, _project) = lookup_nested_project(&meta_dir, &spec.alias)?;
         // The repo goes where it is in the workspace
         let place = place_in_set(&meta_dir, &spec.alias, &source);
+        // As in create: a repo given twice, by name or by path, is one
+        // worktree, and refused on two branches
+        if let Some((first, ..)) = planned.iter().find(|(_, _, p)| same_place(p, &place)) {
+            let first_branch = resolve_branch(name, None, first.branch.as_deref());
+            let branch = resolve_branch(name, None, spec.branch.as_deref());
+            if first_branch != branch {
+                anyhow::bail!(
+                    "Repo '{}' is given twice, on branches '{}' and '{}'",
+                    escape(&place),
+                    escape(&first_branch),
+                    escape(&branch)
+                );
+            }
+            continue;
+        }
         if existing.iter().any(|r| same_place(&r.alias, &place)) {
             anyhow::bail!(
-                "Repo '{}' already exists in worktree '{name}'",
-                escape(&spec.alias)
+                "Repo '{}' already exists in worktree '{}'",
+                escape(&spec.alias),
+                escape(name)
             );
         }
 
-        let dest = wt_dir.join(&place);
         // A checkout already in the worktree (such as the root repo's) may
         // hold a symlink where this one goes; git must not follow it out
-        meta_core::config::resolve_inside(&wt_dir, &place).map_err(|why| {
+        dest_in_set(&wt_dir, &place).map_err(|why| {
             anyhow::anyhow!(
                 "Refusing to add the worktree for '{}': {why}",
                 escape(&spec.alias)
             )
         })?;
-        planned.push((spec, source, place, dest));
+        planned.push((spec, source, place));
     }
 
     let mut added = Vec::new();
     let mut failed = None;
-    for (spec, source, place, dest) in planned {
+    for (spec, source, place) in planned {
         let branch = resolve_branch(name, None, spec.branch.as_deref());
         // Again now: a checkout added above (a parent repo's) may have put a
         // symlink where this one goes
-        if let Err(why) = meta_core::config::resolve_inside(&wt_dir, &place) {
-            failed = Some(anyhow::anyhow!(
-                "Refusing to add the worktree for '{}': {why}",
-                escape(&spec.alias)
-            ));
-            break;
-        }
+        let dest = match dest_in_set(&wt_dir, &place) {
+            Ok(dest) => dest,
+            Err(why) => {
+                failed = Some(anyhow::anyhow!(
+                    "Refusing to add the worktree for '{}': {why}",
+                    escape(&spec.alias)
+                ));
+                break;
+            }
+        };
 
         // Ensure parent directories exist for nested paths (e.g., "vendor/")
         if let Some(parent) = dest.parent() {

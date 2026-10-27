@@ -333,10 +333,9 @@ pub(crate) fn handle_create(
 
             // The repo goes where it is in the workspace
             let place = place_in_set(&meta_dir, alias, source);
-            let dest = wt_dir.join(&place);
             // A checkout already in the worktree (such as the root repo's) may
             // hold a symlink where this one goes; git must not follow it out
-            meta_core::config::resolve_inside(&wt_dir, &place).map_err(|why| {
+            let dest = dest_in_set(&wt_dir, &place).map_err(|why| {
                 anyhow::anyhow!(
                     "Refusing to add the worktree for '{}': {why}",
                     escape(alias)
@@ -841,6 +840,18 @@ fn ensure_intermediate_parents(
     let mut to_add: Vec<(String, std::path::PathBuf, String)> = Vec::new();
     let mut added: HashSet<String> = HashSet::new();
 
+    // Only a nested place reads the nested configs
+    let tree = if existing.iter().any(|place| place.contains('/')) {
+        meta_core::config::walk_meta_tree(meta_dir, None)?
+    } else {
+        Vec::new()
+    };
+    let projects_by_place: std::collections::HashMap<String, std::path::PathBuf> =
+        meta_core::config::build_project_map(&tree, meta_dir, "")
+            .into_iter()
+            .map(|(place, (source, _))| (place, source))
+            .collect();
+
     for (alias, source, _branch) in &repos {
         // Only a repo nested in the set needs its parents: they follow from
         // where it goes, not from its name
@@ -860,51 +871,22 @@ fn ensure_intermediate_parents(
                 continue;
             }
 
-            // Resolve the parent's source path via config lookup (respects custom
-            // `path` settings) with a fallback to direct path joining.
-            // A fallback directory must lie inside the workspace and not be a
-            // symlink: it becomes a source repo for git
-            // A parent is the repo at that path, not one by that name
-            let by_path = meta_core::config::walk_meta_tree(meta_dir, None)
-                .ok()
-                .and_then(|tree| {
-                    meta_core::config::build_project_map(&tree, meta_dir, "").remove(&parent_alias)
-                })
-                .map(|(source, _)| source);
-            let parent_source = match by_path {
-                Some(source) => source,
-                None => {
-                    let candidate = meta_dir.join(&parent_alias);
-                    let is_link = candidate
-                        .symlink_metadata()
-                        .is_ok_and(|meta| meta.file_type().is_symlink());
-                    if is_link
-                        || meta_core::config::resolve_inside(meta_dir, &parent_alias).is_err()
-                    {
-                        log::warn!(
-                            "Intermediate parent '{}' is not a plain directory inside the workspace, skipping",
-                            escape(&parent_alias)
-                        );
-                        continue;
-                    }
-                    candidate
-                }
-            };
-            if !parent_source.exists() {
+            // A parent is the project at that path, not one by that name; a
+            // repo the workspace doesn't list is not added (remove would
+            // refuse it as foreign)
+            let Some(parent_source) = projects_by_place.get(&parent_alias).cloned() else {
                 log::warn!(
-                    "Intermediate parent '{}' for nested repo '{}' not found at {:?}, skipping",
-                    parent_alias,
-                    alias,
-                    parent_source
+                    "Intermediate parent '{}' for nested repo '{}' is not a project of the workspace, skipping",
+                    escape(&parent_alias),
+                    escape(alias)
                 );
                 continue;
-            }
-
-            // Only add if it's actually a git repo (has .git dir or .git file)
+            };
             if !parent_source.join(".git").exists() {
                 log::warn!(
-                    "Intermediate parent '{}' for nested repo '{}' exists but is not a git repo (no .git), skipping",
-                    parent_alias, alias
+                    "Intermediate parent '{}' for nested repo '{}' is not cloned, skipping",
+                    escape(&parent_alias),
+                    escape(alias)
                 );
                 continue;
             }
@@ -912,8 +894,8 @@ fn ensure_intermediate_parents(
             let branch = resolve_branch(worktree_name, branch_flag, None);
             log::info!(
                 "Adding intermediate parent '{}' for nested repo '{}'",
-                parent_alias,
-                alias
+                escape(&parent_alias),
+                escape(alias)
             );
             to_add.push((parent_alias, parent_source, branch));
         }

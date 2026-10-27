@@ -16,7 +16,9 @@ pub(crate) fn handle_remove(args: DestroyArgs, verbose: bool, json: bool) -> Res
     let force = args.force;
 
     let meta_dir = require_meta_dir()?;
-    let worktree_root = resolve_worktree_root(Some(&meta_dir))?;
+    // Inside a set, the sets are where the checkout it was made from keeps them
+    let origin = meta_core::config::main_checkout(&meta_dir).unwrap_or_else(|| meta_dir.clone());
+    let worktree_root = resolve_worktree_root(Some(&origin))?;
     let wt_dir = worktree_set_dir(&worktree_root, name)?;
 
     if !wt_dir.exists() {

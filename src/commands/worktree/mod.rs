@@ -107,14 +107,8 @@ pub fn execute_worktree_command(
                 _ => {
                     // Actual parse errors: clap's message names the problem
                     // and where to get help; the whole git help would bury it
-                    // clap quotes the values it rejects as given. Parsing the
-                    // escaped arguments gives the same error with values that
-                    // can't move the cursor or forge a line
-                    let shown = clap_args.iter().map(|arg| escape(arg).into_owned());
-                    let message = match WorktreeParser::try_parse_from(shown) {
-                        Err(shown) => shown.to_string(),
-                        Ok(_) => e.to_string(),
-                    };
+                    let message =
+                        meta_cli::args::escaped_error::<WorktreeParser>(&clap_args).to_string();
                     let message = message.strip_prefix("error: ").unwrap_or(&message);
                     CommandResult::Error(message.trim_end().to_string())
                 }

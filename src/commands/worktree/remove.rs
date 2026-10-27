@@ -1,6 +1,6 @@
 use anyhow::Result;
 use colored::*;
-use meta_core::display::escape_path;
+use meta_core::display::{escape, escape_path};
 
 use meta_git_lib::worktree::helpers::*;
 use meta_git_lib::worktree::hooks::fire_post_destroy;
@@ -29,11 +29,22 @@ pub(crate) fn handle_remove(args: DestroyArgs, verbose: bool, json: bool) -> Res
     let workspace = Workspace::of(&meta_dir);
     let foreign = workspace.foreign_members(&wt_dir, &check);
     if !foreign.is_empty() {
+        // Repositories meta couldn't read make sets from them look foreign
+        let unreadable: String = workspace
+            .unreadable
+            .iter()
+            .map(|(path, e)| format!("\n  {}: {}", escape_path(path), escape(&format!("{e:#}"))))
+            .collect();
         anyhow::bail!(
             "Refusing to remove worktree '{name}': it is not a set of this workspace ({}):\n  {}\n\
-             Remove it from the workspace that made it.",
+             Remove it from the workspace that made it.{}",
             escape_path(&workspace.root),
-            foreign.join("\n  ")
+            foreign.join("\n  "),
+            if unreadable.is_empty() {
+                String::new()
+            } else {
+                format!("\nParts of this workspace couldn't be read:{unreadable}")
+            }
         );
     }
     if !check.blockers.is_empty() {

@@ -815,10 +815,11 @@ fn ensure_intermediate_parents(
     worktree_name: &str,
     branch_flag: Option<&str>,
 ) -> Result<Vec<(String, std::path::PathBuf, String)>> {
-    // A repo selected under its name is already there at its path too
+    // Where the selected repos go: a parent is there when a repo is at its
+    // path, whatever name selected it
     let existing: HashSet<String> = repos
         .iter()
-        .flat_map(|(a, s, _)| [a.clone(), place_in_set(meta_dir, a, s)])
+        .map(|(a, s, _)| place_in_set(meta_dir, a, s))
         .collect();
 
     let mut to_add: Vec<(String, std::path::PathBuf, String)> = Vec::new();
@@ -845,9 +846,16 @@ fn ensure_intermediate_parents(
             // `path` settings) with a fallback to direct path joining.
             // A fallback directory must lie inside the workspace and not be a
             // symlink: it becomes a source repo for git
-            let parent_source = match lookup_nested_project(meta_dir, &parent_alias) {
-                Ok((source, _project)) => source,
-                Err(_) => {
+            // A parent is the repo at that path, not one by that name
+            let by_path = meta_core::config::walk_meta_tree(meta_dir, None)
+                .ok()
+                .and_then(|tree| {
+                    meta_core::config::build_project_map(&tree, meta_dir, "").remove(&parent_alias)
+                })
+                .map(|(source, _)| source);
+            let parent_source = match by_path {
+                Some(source) => source,
+                None => {
                     let candidate = meta_dir.join(&parent_alias);
                     let is_link = candidate
                         .symlink_metadata()

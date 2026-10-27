@@ -61,7 +61,7 @@ pub(crate) fn handle_add(args: AddArgs, verbose: bool, json: bool) -> Result<()>
         let (source, _project) = lookup_nested_project(&meta_dir, &spec.alias)?;
         // The repo goes where it is in the workspace
         let place = place_in_set(&meta_dir, &spec.alias, &source);
-        if existing.iter().any(|r| r.alias == place) {
+        if existing.iter().any(|r| same_place(&r.alias, &place)) {
             anyhow::bail!(
                 "Repo '{}' already exists in worktree '{name}'",
                 escape(&spec.alias)
@@ -165,4 +165,24 @@ pub(crate) fn handle_add(args: AddArgs, verbose: bool, json: bool) -> Result<()>
     }
 
     failed.map_or(Ok(()), Err)
+}
+
+/// Whether two places in a set name the same directory. Discovery spells a
+/// place with the platform's separator (`vendor\\app` on Windows), plans with
+/// `/`; as paths they compare equal.
+fn same_place(a: &str, b: &str) -> bool {
+    std::path::Path::new(a) == std::path::Path::new(b)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::same_place;
+
+    #[test]
+    fn places_compare_as_paths() {
+        assert!(same_place("vendor/app", "vendor/app"));
+        assert!(!same_place("vendor/app", "vendor/other"));
+        #[cfg(windows)]
+        assert!(same_place("vendor\\app", "vendor/app"));
+    }
 }

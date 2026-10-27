@@ -57,37 +57,36 @@ pub(crate) fn handle_add(args: AddArgs, verbose: bool, json: bool) -> Result<()>
             }
             continue;
         }
-        if existing.iter().any(|r| r.alias == spec.alias) {
+        // Use recursive lookup for nested paths (containing '/')
+        let (source, _project) = lookup_nested_project(&meta_dir, &spec.alias)?;
+        // The repo goes where it is in the workspace
+        let place = place_in_set(&meta_dir, &spec.alias, &source);
+        if existing.iter().any(|r| r.alias == place) {
             anyhow::bail!(
                 "Repo '{}' already exists in worktree '{name}'",
                 escape(&spec.alias)
             );
         }
 
-        // Use recursive lookup for nested paths (containing '/')
-        let (source, _project) = lookup_nested_project(&meta_dir, &spec.alias)?;
-
-        // Preserve the full alias as the destination path so that relative
-        // references (e.g., Cargo.toml workspace members) remain valid.
-        let dest = wt_dir.join(&spec.alias);
+        let dest = wt_dir.join(&place);
         // A checkout already in the worktree (such as the root repo's) may
         // hold a symlink where this one goes; git must not follow it out
-        meta_core::config::resolve_inside(&wt_dir, &spec.alias).map_err(|why| {
+        meta_core::config::resolve_inside(&wt_dir, &place).map_err(|why| {
             anyhow::anyhow!(
                 "Refusing to add the worktree for '{}': {why}",
                 escape(&spec.alias)
             )
         })?;
-        planned.push((spec, source, dest));
+        planned.push((spec, source, place, dest));
     }
 
     let mut added = Vec::new();
     let mut failed = None;
-    for (spec, source, dest) in planned {
+    for (spec, source, place, dest) in planned {
         let branch = resolve_branch(name, None, spec.branch.as_deref());
         // Again now: a checkout added above (a parent repo's) may have put a
         // symlink where this one goes
-        if let Err(why) = meta_core::config::resolve_inside(&wt_dir, &spec.alias) {
+        if let Err(why) = meta_core::config::resolve_inside(&wt_dir, &place) {
             failed = Some(anyhow::anyhow!(
                 "Refusing to add the worktree for '{}': {why}",
                 escape(&spec.alias)

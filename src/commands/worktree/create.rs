@@ -185,6 +185,7 @@ pub(crate) fn handle_create(
     if dry_run {
         let plan = CreateDryRunPlan {
             name,
+            meta_dir: &meta_dir,
             wt_dir: &wt_dir,
             repos_to_create: &repos_to_create,
             from_ref,
@@ -234,6 +235,10 @@ pub(crate) fn handle_create(
     // Anything that fails from here rolls back what this call created.
     let mut created_repos = Vec::new();
     let mut new_branches = Vec::new();
+    // The checkout whose sets these are: inside a set, the one it stands for
+    let owner = meta_core::config::set_source(&meta_dir)
+        .filter(|source| source.is_dir())
+        .unwrap_or_else(|| meta_dir.clone());
     let built = (|| -> Result<()> {
         // Each worktree gets this record as soon as it exists, so `remove`
         // and `prune` know meta made it; a worktree that can't be recorded
@@ -244,9 +249,7 @@ pub(crate) fn handle_create(
                 .with_context(|| format!("Cannot resolve {}", escape_path(&wt_dir)))?,
             // Inside a set, the checkout it stands for: a record never names
             // a set's checkout, which can be removed before this set
-            project: meta_core::config::set_source(&meta_dir)
-                .filter(|source| source.is_dir())
-                .unwrap_or_else(|| meta_dir.clone()),
+            project: owner.clone(),
             created_at: Utc::now().to_rfc3339(),
             ephemeral,
             ttl_seconds,
@@ -305,14 +308,12 @@ pub(crate) fn handle_create(
                 continue;
             }
 
-            // Preserve the full alias as the destination path so that relative
-            // references (e.g., Cargo.toml workspace members) remain valid.
-            // "vendor/tree-sitter-markdown" -> "vendor/tree-sitter-markdown"
-            // Simple aliases are unchanged: "core" -> "core"
-            let dest = wt_dir.join(alias);
+            // The repo goes where it is in the workspace
+            let place = place_in_set(&meta_dir, alias, source);
+            let dest = wt_dir.join(&place);
             // A checkout already in the worktree (such as the root repo's) may
             // hold a symlink where this one goes; git must not follow it out
-            meta_core::config::resolve_inside(&wt_dir, alias).map_err(|why| {
+            meta_core::config::resolve_inside(&wt_dir, &place).map_err(|why| {
                 anyhow::anyhow!(
                     "Refusing to add the worktree for '{}': {why}",
                     escape(alias)
@@ -364,9 +365,7 @@ pub(crate) fn handle_create(
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or(".worktrees");
-        // in the checkout whose sets these are (inside a set, the one it
-        // stands for)
-        let owner = meta_core::config::set_source(&meta_dir).unwrap_or_else(|| meta_dir.clone());
+        // in the checkout whose sets these are
         ensure_worktrees_in_gitignore(&owner, dirname, json)
     })();
     built.map_err(|e| roll_back(&wt_dir, &new_branches, e))?;
@@ -511,6 +510,7 @@ fn roll_back(
 
 struct CreateDryRunPlan<'a> {
     name: &'a str,
+    meta_dir: &'a std::path::Path,
     wt_dir: &'a std::path::Path,
     repos_to_create: &'a [(String, std::path::PathBuf, String)],
     from_ref: Option<&'a str>,
@@ -562,7 +562,7 @@ fn print_create_dry_run(plan: &CreateDryRunPlan<'_>) {
         let dest = if alias == "." {
             plan.wt_dir.to_path_buf()
         } else {
-            plan.wt_dir.join(alias)
+            plan.wt_dir.join(place_in_set(plan.meta_dir, alias, source))
         };
         let mut cmd = format!(
             "git -C {} worktree add -b {} {}",

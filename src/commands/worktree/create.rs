@@ -706,13 +706,13 @@ fn resolve_alias_in_graph(graph: &DependencyGraph, alias: &str) -> Result<String
         0 => anyhow::bail!(
             "Repo '{}' not found in the recursive project graph. \
              With --recursive, use the full path from root (e.g., 'open-source/gitkb/core').",
-            alias
+            escape(alias)
         ),
         _ => anyhow::bail!(
             "Repo alias '{}' is ambiguous — matches: {}. \
              Use the full path to disambiguate.",
-            alias,
-            matches.join(", ")
+            escape(alias),
+            escape(&matches.join(", "))
         ),
     }
 }

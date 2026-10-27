@@ -140,7 +140,7 @@ pub(crate) fn handle_prune(
                 })?
             );
         } else {
-            println!("No worktree sets that meta created were found. Nothing to prune.");
+            println!("No worktree sets of this workspace were found. Nothing to prune.");
         }
         return Ok(());
     }

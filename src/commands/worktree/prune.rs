@@ -69,6 +69,8 @@ fn find_sets(workspace: &Workspace, worktree_root: &Path) -> (Records, Vec<Prune
     for (_, git_dir) in &workspace.repos {
         for (admin, record) in record::in_repo(git_dir) {
             match record {
+                // A workspace sharing this repository made it: its set, not ours
+                Ok(record) if !workspace.made_here(&record.project) => {}
                 Ok(record) => found.push((admin, record)),
                 Err(e) => not_used(&admin, &e),
             }
@@ -90,7 +92,9 @@ fn find_sets(workspace: &Workspace, worktree_root: &Path) -> (Records, Vec<Prune
 /// is `admin`, if git's link back to the worktree leads there.
 fn set_of_admin(admin: &Path, worktree_root: &Path) -> Option<PathBuf> {
     let gitdir = std::fs::read_to_string(admin.join("gitdir")).ok()?;
+    // git may write it relative to `admin` (worktree.useRelativePaths)
     let checkout = admin.join(gitdir.trim());
+    let checkout = checkout.canonicalize().unwrap_or(checkout);
     let name = checkout
         .strip_prefix(worktree_root)
         .ok()?
@@ -410,13 +414,41 @@ fn warn_kept(kept: &[PruneEntry], strict: bool) -> Result<()> {
     if kept.is_empty() {
         return Ok(());
     }
-    let names: Vec<&str> = kept.iter().map(|e| e.name.as_str()).collect();
+    let names: Vec<_> = kept.iter().map(|e| escape(&e.name)).collect();
     super::warn_or_bail(strict, format!("Kept worktrees: {}", names.join(", ")))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_relative_gitdir_finds_its_set() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap().join("wt");
+        let checkout = root.join("broken/a");
+        std::fs::create_dir_all(&checkout).unwrap();
+        std::fs::write(checkout.join(".git"), "").unwrap();
+        let admin = tmp.path().join("repo/.git/worktrees/a");
+        std::fs::create_dir_all(&admin).unwrap();
+        std::fs::write(admin.join("gitdir"), "../../../../wt/broken/a/.git\n").unwrap();
+        assert_eq!(set_of_admin(&admin, &root), Some(root.join("broken")));
+    }
+
+    #[test]
+    fn kept_names_are_escaped_on_one_line() {
+        let kept = [create_prune_entry(
+            "bad\nFORGED\u{1b}[2J".to_string(),
+            String::new(),
+            "",
+            None,
+        )];
+        let message = warn_kept(&kept, true).unwrap_err().to_string();
+        assert!(
+            !message.contains('\n') && !message.contains('\u{1b}'),
+            "{message}"
+        );
+    }
 
     // ── create_prune_entry ──────────────────────────────
 

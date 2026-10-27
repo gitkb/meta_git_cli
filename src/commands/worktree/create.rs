@@ -522,10 +522,13 @@ fn print_create_dry_run(plan: &CreateDryRunPlan<'_>) {
     println!();
 
     if let Some(from_ref) = plan.from_ref {
-        println!("Start ref: {from_ref}");
+        println!("Start ref: {}", escape(from_ref));
     }
     if let Some(from_pr_spec) = plan.from_pr_spec {
-        println!("PR source: would resolve {from_pr_spec} and fetch the matching head branch");
+        println!(
+            "PR source: would resolve {} and fetch the matching head branch",
+            escape(from_pr_spec)
+        );
     }
     if plan.ephemeral {
         println!("Ephemeral: true");
@@ -538,7 +541,7 @@ fn print_create_dry_run(plan: &CreateDryRunPlan<'_>) {
             "Metadata: {}",
             plan.custom_meta
                 .iter()
-                .map(|(k, v)| format!("{k}={v}"))
+                .map(|(k, v)| format!("{}={}", escape(k), escape(v)))
                 .collect::<Vec<_>>()
                 .join(", ")
         );

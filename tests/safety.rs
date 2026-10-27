@@ -648,12 +648,16 @@ fn a_set_holding_another_recorded_set_is_not_deleted() {
     let ws = workspace(root, &["a"]);
     let out = worktree(root, &ws, &["create", "outer", "--repo", ".", "--no-deps"]);
     assert!(out.status.success(), "{}", stderr(&out));
-    // A set created from inside the outer one lands in its .worktrees.
+    // A set placed inside the outer one (from inside a set, sets go where
+    // the workspace keeps them, so the place is given)
     let outer = ws.join(".worktrees/outer");
-    let out = worktree(
+    let out = meta_git_in(
         root,
         &outer,
-        &["create", "inner", "--repo", ".", "--no-deps"],
+        "git worktree create",
+        &["inner", "--repo", ".", "--no-deps"],
+        json!({}),
+        Some(&outer.join(".worktrees")),
     );
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(outer.join(".worktrees/inner").exists());

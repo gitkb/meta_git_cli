@@ -84,7 +84,7 @@ pub(crate) fn handle_diff(args: DiffArgs, _verbose: bool, json: bool) -> Result<
                 total_repos_changed,
             );
         } else {
-            println!("  No changes vs {base_ref}");
+            println!("  No changes vs {}", escape(base_ref));
         }
     }
 

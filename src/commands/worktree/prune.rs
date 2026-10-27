@@ -105,12 +105,9 @@ fn set_of_admin(admin: &Path, worktree_root: &Path) -> Option<PathBuf> {
 
 /// Why an existing set with `record` is due for pruning, if it is: the
 /// reason and, for an expired TTL, its age. (A set whose repositories were
-/// removed from the project is no longer this workspace's: prune leaves it.)
+/// removed from the project, or whose project is gone, is no longer this
+/// workspace's: prune leaves it.)
 fn eligible(record: &SetRecord, now: i64) -> Option<(String, Option<u64>)> {
-    // Check if source project directory still exists
-    if !record.project.exists() {
-        return Some(("orphaned (source project missing)".to_string(), None));
-    }
     // Check TTL expiration
     let remaining = record.ttl_remaining(now).filter(|r| *r <= 0)?;
     // Total age = configured TTL + seconds past expiry
@@ -131,9 +128,7 @@ pub(crate) fn handle_prune(
 
     let meta_dir = require_meta_dir()?;
     let workspace = Workspace::of(&meta_dir);
-    // Inside a set, the sets are where the meta dir it was made from keeps them
-    let origin = meta_core::config::set_origin(&meta_dir).unwrap_or_else(|| meta_dir.clone());
-    let worktree_root = resolve_worktree_root(Some(&origin))?;
+    let worktree_root = resolve_worktree_root(Some(&meta_dir))?;
     let (sets, mut kept) = find_sets(&workspace, &worktree_root);
     if sets.is_empty() && kept.is_empty() {
         if json {

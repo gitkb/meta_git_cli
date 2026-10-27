@@ -59,7 +59,7 @@ pub(crate) fn handle_diff(args: DiffArgs, _verbose: bool, json: bool) -> Result<
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
         // Human mode: always show stat summary
-        println!("{} vs {}:", name.bold(), base_ref);
+        println!("{} vs {}:", name.bold(), escape(base_ref));
         for d in &diff_entries {
             if d.files_changed > 0 {
                 let insertions = d.insertions;

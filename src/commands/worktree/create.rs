@@ -242,7 +242,11 @@ pub(crate) fn handle_create(
             set: wt_dir
                 .canonicalize()
                 .with_context(|| format!("Cannot resolve {}", escape_path(&wt_dir)))?,
-            project: meta_dir.clone(),
+            // Inside a set, the checkout it stands for: a record never names
+            // a set's checkout, which can be removed before this set
+            project: meta_core::config::set_source(&meta_dir)
+                .filter(|source| source.is_dir())
+                .unwrap_or_else(|| meta_dir.clone()),
             created_at: Utc::now().to_rfc3339(),
             ephemeral,
             ttl_seconds,
@@ -360,7 +364,10 @@ pub(crate) fn handle_create(
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or(".worktrees");
-        ensure_worktrees_in_gitignore(&meta_dir, dirname, json)
+        // in the checkout whose sets these are (inside a set, the one it
+        // stands for)
+        let owner = meta_core::config::set_source(&meta_dir).unwrap_or_else(|| meta_dir.clone());
+        ensure_worktrees_in_gitignore(&owner, dirname, json)
     })();
     built.map_err(|e| roll_back(&wt_dir, &new_branches, e))?;
 

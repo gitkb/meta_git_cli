@@ -22,13 +22,19 @@ fn build_loop_config(
     json: bool,
 ) -> Result<loop_lib::LoopConfig> {
     let directories: Vec<String> = repos.iter().map(|r| r.path.display().to_string()).collect();
-    // A member sits at its alias, so its path in the set is its name
+    // A set lays its repos out as the workspace, so the set's config names
+    // them, by project name or path
+    let names: Vec<(String, String)> = meta_core::config::find_meta_config_in(wt_dir)?
+        .map(|(config, _)| meta_core::config::parse_meta_config(&config))
+        .transpose()?
+        .map(|(projects, _)| projects.into_iter().map(|p| (p.name, p.path)).collect())
+        .unwrap_or_default();
     let directories = repo_filter::select(
         &include_filters,
         &exclude_filters,
         &directories,
         wt_dir,
-        &[],
+        &names,
     )?;
     Ok(loop_lib::LoopConfig {
         directories,

@@ -178,9 +178,16 @@ pub(crate) fn handle_create(
     // parents ("gitkb") get worktrees too — the thin spine from root to target.
     let mut repos_to_create =
         ensure_intermediate_parents(&meta_dir, repos_to_create, name, branch_flag)?;
-    // One worktree per alias: a repeated --repo would try the same add twice
+    // One worktree per place in the set: a repeated --repo, or a repo named
+    // both by its name and by its path, would try the same add twice
     let mut seen = HashSet::new();
-    repos_to_create.retain(|(alias, _, _)| seen.insert(alias.clone()));
+    repos_to_create
+        .retain(|(alias, source, _)| seen.insert(place_in_set(&meta_dir, alias, source)));
+    // A repo goes in before any repo inside it, whatever order they were named in
+    repos_to_create.sort_by_key(|(alias, source, _)| {
+        let place = place_in_set(&meta_dir, alias, source);
+        (alias != ".", place.split('/').count())
+    });
 
     if dry_run {
         let plan = CreateDryRunPlan {
@@ -808,7 +815,11 @@ fn ensure_intermediate_parents(
     worktree_name: &str,
     branch_flag: Option<&str>,
 ) -> Result<Vec<(String, std::path::PathBuf, String)>> {
-    let existing: HashSet<String> = repos.iter().map(|(a, _, _)| a.clone()).collect();
+    // A repo selected under its name is already there at its path too
+    let existing: HashSet<String> = repos
+        .iter()
+        .flat_map(|(a, s, _)| [a.clone(), place_in_set(meta_dir, a, s)])
+        .collect();
 
     let mut to_add: Vec<(String, std::path::PathBuf, String)> = Vec::new();
     let mut added: HashSet<String> = HashSet::new();

@@ -66,7 +66,7 @@ fn find_sets(workspace: &Workspace, worktree_root: &Path) -> (Records, Vec<Prune
     for (path, e) in &workspace.unreadable {
         not_used(path, e);
     }
-    for (_, git_dir) in &workspace.repos {
+    for git_dir in &workspace.repos {
         for (admin, record) in record::in_repo(git_dir) {
             match record {
                 // A workspace sharing this repository made it: its set, not ours
@@ -131,7 +131,9 @@ pub(crate) fn handle_prune(
 
     let meta_dir = require_meta_dir()?;
     let workspace = Workspace::of(&meta_dir);
-    let worktree_root = resolve_worktree_root(Some(&meta_dir))?;
+    // Inside a set, the sets are where the meta dir it was made from keeps them
+    let origin = meta_core::config::set_origin(&meta_dir).unwrap_or_else(|| meta_dir.clone());
+    let worktree_root = resolve_worktree_root(Some(&origin))?;
     let (sets, mut kept) = find_sets(&workspace, &worktree_root);
     if sets.is_empty() && kept.is_empty() {
         if json {

@@ -43,7 +43,10 @@ pub(crate) fn handle_create(
         } else {
             super::warn_or_bail(
                 strict,
-                format!("--meta value '{s}' missing '=' separator (expected key=value), skipping"),
+                format!(
+                    "--meta value '{}' missing '=' separator (expected key=value), skipping",
+                    escape(s)
+                ),
             )?;
         }
     }
@@ -202,7 +205,9 @@ pub(crate) fn handle_create(
             .find(|(alias, source, _)| alias != "." && repo_matches_spec(source, pr_repo_spec))
             .ok_or_else(|| {
                 anyhow::anyhow!(
-                    "No selected repo has origin '{pr_repo_spec}', so PR branch '{pr_branch}' can't be applied"
+                    "No selected repo has origin '{}', so PR branch '{}' can't be applied",
+                    escape(pr_repo_spec),
+                    escape(pr_branch)
                 )
             })?;
         git_fetch_branch(source, pr_branch)
@@ -253,7 +258,10 @@ pub(crate) fn handle_create(
         if let Some((_, source, branch)) = repos_to_create.iter().find(|(a, _, _)| a == ".") {
             if let Some(r) = missing_ref(source, from_ref)? {
                 // --from-ref: skip root repo if ref doesn't exist (same as child repos)
-                super::warn_or_bail(strict, format!("Skipping '.': ref '{r}' not found"))?;
+                super::warn_or_bail(
+                    strict,
+                    format!("Skipping '.': ref '{}' not found", escape(r)),
+                )?;
             } else {
                 if verbose {
                     eprintln!(
@@ -282,7 +290,14 @@ pub(crate) fn handle_create(
             }
             if let Some(r) = missing_ref(source, from_ref)? {
                 // --from-ref: skip repos where ref doesn't exist
-                super::warn_or_bail(strict, format!("Skipping '{alias}': ref '{r}' not found"))?;
+                super::warn_or_bail(
+                    strict,
+                    format!(
+                        "Skipping '{}': ref '{}' not found",
+                        escape(alias),
+                        escape(r)
+                    ),
+                )?;
                 continue;
             }
 
@@ -332,7 +347,10 @@ pub(crate) fn handle_create(
         if created_repos.is_empty() {
             // Every repo was skipped because none has the ref.
             match from_ref {
-                Some(r) => anyhow::bail!("No selected repo has ref '{r}'; no worktree was created"),
+                Some(r) => anyhow::bail!(
+                    "No selected repo has ref '{}'; no worktree was created",
+                    escape(r)
+                ),
                 None => anyhow::bail!("No repos selected; no worktree was created"),
             }
         }

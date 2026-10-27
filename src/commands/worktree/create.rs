@@ -180,6 +180,22 @@ pub(crate) fn handle_create(
         ensure_intermediate_parents(&meta_dir, repos_to_create, name, branch_flag)?;
     // One worktree per place in the set: a repeated --repo, or a repo named
     // both by its name and by its path, would try the same add twice
+    let mut branches: HashMap<String, &str> = HashMap::new();
+    for (alias, source, branch) in &repos_to_create {
+        let place = place_in_set(&meta_dir, alias, source);
+        match branches.get(place.as_str()) {
+            Some(first) if *first != branch.as_str() => anyhow::bail!(
+                "Repo '{}' is given twice, on branches '{}' and '{}'",
+                escape(&place),
+                escape(first),
+                escape(branch)
+            ),
+            Some(_) => {}
+            None => {
+                branches.insert(place, branch);
+            }
+        }
+    }
     let mut seen = HashSet::new();
     repos_to_create
         .retain(|(alias, source, _)| seen.insert(place_in_set(&meta_dir, alias, source)));
@@ -825,15 +841,17 @@ fn ensure_intermediate_parents(
     let mut to_add: Vec<(String, std::path::PathBuf, String)> = Vec::new();
     let mut added: HashSet<String> = HashSet::new();
 
-    for (alias, _source, _branch) in &repos {
-        // Only nested aliases need intermediate parents
-        if !alias.contains('/') {
+    for (alias, source, _branch) in &repos {
+        // Only a repo nested in the set needs its parents: they follow from
+        // where it goes, not from its name
+        let place = place_in_set(meta_dir, alias, source);
+        if !place.contains('/') {
             continue;
         }
 
         // Walk up through path segments: "gitkb/core" → check "gitkb"
         // "a/b/c" → check "a", "a/b"
-        let parts: Vec<&str> = alias.split('/').collect();
+        let parts: Vec<&str> = place.split('/').collect();
         for i in 1..parts.len() {
             let parent_alias = parts[..i].join("/");
 

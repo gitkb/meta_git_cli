@@ -22,10 +22,20 @@ fn build_loop_config(
     json: bool,
 ) -> Result<loop_lib::LoopConfig> {
     let directories: Vec<String> = repos.iter().map(|r| r.path.display().to_string()).collect();
-    // A set lays its repos out as the workspace, so the config there (the
-    // set's own, or the workspace's above a set without its root) names
-    // them, by project name or path
-    let names: Vec<(String, String)> = meta_core::config::find_meta_config(wt_dir, None)?
+    // A set lays its repos out as the workspace, so the set's config names
+    // them, by project name or path; a set without its root has the config
+    // of the workspace it was made from
+    let config_dir = match meta_core::config::find_meta_config_in(wt_dir)? {
+        Some(_) => Some(wt_dir.to_path_buf()),
+        None => repos
+            .iter()
+            .find_map(|r| meta_core::config::recorded_project(&r.path)),
+    };
+    let config = match &config_dir {
+        Some(dir) => meta_core::config::find_meta_config_in(dir)?,
+        None => None,
+    };
+    let names: Vec<(String, String)> = config
         .map(|(config, _)| meta_core::config::parse_meta_config(&config))
         .transpose()?
         .map(|(projects, _)| projects.into_iter().map(|p| (p.name, p.path)).collect())

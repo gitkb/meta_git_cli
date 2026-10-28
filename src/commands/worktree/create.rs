@@ -894,6 +894,11 @@ fn ensure_intermediate_parents(
             // repo the workspace doesn't list is not added (remove would
             // refuse it as foreign)
             let Some(parent_source) = project_at(meta_dir, &parent_alias)? else {
+                // A plain directory on the way is no parent; a repo that
+                // isn't a project is worth saying so
+                if !meta_dir.join(&parent_alias).join(".git").exists() {
+                    continue;
+                }
                 eprintln!(
                     "{} Intermediate parent '{}' for nested repo '{}' is not a project of the workspace, skipping",
                     "warning:".yellow().bold(),

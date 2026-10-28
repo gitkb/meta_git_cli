@@ -2,7 +2,7 @@ use anyhow::Result;
 use colored::*;
 use meta_core::display::{escape, escape_path};
 
-use meta_cli::worktree::discover_worktree_repos;
+use meta_cli::worktree::discover_worktree_repos_recursive;
 use meta_git_lib::worktree::git_ops::git_worktree_add;
 use meta_git_lib::worktree::helpers::*;
 use meta_git_lib::worktree::record;
@@ -38,7 +38,8 @@ pub(crate) fn handle_add(args: AddArgs, verbose: bool, json: bool) -> Result<()>
     }
 
     // Check existing repos in the worktree
-    let existing = discover_worktree_repos(&wt_dir)?;
+    // Nested ones too (`parent/leaf`): a repo already in the set at any depth
+    let existing = discover_worktree_repos_recursive(&wt_dir)?;
 
     // What is added joins the set's record, if meta made the set; one it
     // didn't make stays unrecorded, so `remove` keeps refusing it.

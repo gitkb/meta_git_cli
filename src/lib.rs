@@ -23,9 +23,9 @@ use helpers::get_project_directories_with_fallback;
 /// Execute a command for meta repositories.
 ///
 /// The `projects` parameter is the list of project directories passed from meta_cli.
-/// When meta_cli runs with `--recursive`, it discovers nested .meta files and passes
+/// When meta_cli runs with `--recursive`, it discovers nested .meta.yaml files and passes
 /// all project directories here. If `projects` is empty, we fall back to reading
-/// the local .meta file via `get_project_directories()`.
+/// the local .meta.yaml file via `get_project_directories()`.
 pub fn execute_command(
     command: &str,
     args: &[String],
@@ -68,7 +68,7 @@ pub fn execute_command(
             if options.include_filters.is_some() || options.exclude_filters.is_some() =>
         {
             Err(anyhow::anyhow!(
-                "meta {command} finds its repos itself (in the .meta files); it does not take --include/--exclude"
+                "meta {command} finds its repos itself (in the .meta.yaml files); it does not take --include/--exclude"
             ))
         }
         "git status" => status::execute_git_status(projects, options, cwd),
@@ -167,8 +167,8 @@ Meta options:\n\
   --dry-run             Show the command that would run in each repo\n\
   --recursive           Include repos from nested meta workspaces\n\
   --depth <N>           Limit recursive traversal depth\n\
-  --include <REPOS>     Only these repos (.meta name or path from the root)\n\
-  --exclude <REPOS>     Skip these repos (.meta name or path from the root)\n\
+  --include <REPOS>     Only these repos (.meta.yaml name or path from the root)\n\
+  --exclude <REPOS>     Skip these repos (.meta.yaml name or path from the root)\n\
   --tag <TAGS>          Filter by project tag(s), comma-separated\n\
   --parallel            Run repo commands concurrently\n\
   --sequential          Run repo commands one at a time\n\n\
@@ -348,7 +348,7 @@ mod tests {
     #[test]
     fn test_meta_config_parsing() {
         let dir = tempfile::tempdir().unwrap();
-        let meta_path = dir.path().join(".meta");
+        let meta_path = dir.path().join(".meta.yaml");
         std::fs::write(
             &meta_path,
             r#"{"projects": {"foo": "git@github.com:org/foo.git", "bar": "git@github.com:org/bar.git"}}"#,
@@ -743,7 +743,7 @@ the only commit message
 
         let dirs = get_project_directories(temp_dir.path()).unwrap();
 
-        // Should return just "." when no .meta file
+        // Should return just "." when no .meta.yaml file
         assert_eq!(dirs, vec!["."]);
     }
 
@@ -752,7 +752,7 @@ the only commit message
         // A refused config is an error, not "just the root"
         let temp_dir = TempDir::new().unwrap();
         std::fs::write(
-            temp_dir.path().join(".meta"),
+            temp_dir.path().join(".meta.yaml"),
             r#"{"projects": {"evil": {"repo": "u", "path": "../../x"}}}"#,
         )
         .unwrap();
@@ -768,9 +768,9 @@ the only commit message
     fn test_get_project_directories_with_meta_file() {
         let temp_dir = TempDir::new().unwrap();
 
-        // Create .meta file
+        // Create .meta.yaml file
         let meta_content = r#"{"projects": {"alpha": "url1", "beta": "url2", "gamma": "url3"}}"#;
-        std::fs::write(temp_dir.path().join(".meta"), meta_content).unwrap();
+        std::fs::write(temp_dir.path().join(".meta.yaml"), meta_content).unwrap();
 
         let dirs = get_project_directories(temp_dir.path()).unwrap();
 
@@ -786,9 +786,9 @@ the only commit message
     fn test_get_project_directories_sorted() {
         let temp_dir = TempDir::new().unwrap();
 
-        // Create .meta file with unsorted projects
+        // Create .meta.yaml file with unsorted projects
         let meta_content = r#"{"projects": {"zebra": "url1", "alpha": "url2", "middle": "url3"}}"#;
-        std::fs::write(temp_dir.path().join(".meta"), meta_content).unwrap();
+        std::fs::write(temp_dir.path().join(".meta.yaml"), meta_content).unwrap();
 
         let dirs = get_project_directories(temp_dir.path()).unwrap();
 
@@ -802,9 +802,9 @@ the only commit message
     fn test_get_project_directories_empty_projects() {
         let temp_dir = TempDir::new().unwrap();
 
-        // Create .meta file with no projects
+        // Create .meta.yaml file with no projects
         let meta_content = r#"{"projects": {}}"#;
-        std::fs::write(temp_dir.path().join(".meta"), meta_content).unwrap();
+        std::fs::write(temp_dir.path().join(".meta.yaml"), meta_content).unwrap();
 
         let dirs = get_project_directories(temp_dir.path()).unwrap();
 

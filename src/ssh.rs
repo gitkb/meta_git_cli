@@ -3,12 +3,12 @@ use meta_core::display::escape;
 use std::collections::BTreeSet;
 use std::path::Path;
 
-/// Discover unique SSH remote URLs from the .meta config in the current directory.
+/// Discover unique SSH remote URLs from the .meta.yaml in the current directory.
 /// Returns the full SSH URLs (preserving user, host, and port) so callers can
 /// pass them directly to `establish_ssh_masters` without information loss.
-/// Returns an empty list if no .meta config is found or no SSH URLs exist.
+/// Returns an empty list if no .meta.yaml is found or no SSH URLs exist.
 pub fn discover_ssh_urls(cwd: &Path) -> Vec<String> {
-    let Ok(Some((config_path, _format))) = meta_core::config::find_meta_config(cwd, None) else {
+    let Ok(Some(config_path)) = meta_core::config::find_meta_config(cwd, None) else {
         return vec![];
     };
 
@@ -26,7 +26,7 @@ pub fn discover_ssh_urls(cwd: &Path) -> Vec<String> {
     urls.into_iter().collect()
 }
 
-/// A remote URL mismatch between .meta config and the actual repo.
+/// A remote URL mismatch between .meta.yaml and the actual repo.
 pub(crate) struct RemoteMismatch {
     pub name: String,
     /// The configured path (may differ from name for custom paths / nested repos).
@@ -35,10 +35,10 @@ pub(crate) struct RemoteMismatch {
     pub actual: String,
 }
 
-/// Check child repos for remote URL mismatches against .meta config.
+/// Check child repos for remote URL mismatches against .meta.yaml.
 /// Returns a list of mismatches found (non-interactive, no prompts).
 pub(crate) fn find_remote_mismatches(cwd: &Path) -> Vec<RemoteMismatch> {
-    let Ok(Some((config_path, _format))) = meta_core::config::find_meta_config(cwd, None) else {
+    let Ok(Some(config_path)) = meta_core::config::find_meta_config(cwd, None) else {
         return vec![];
     };
 

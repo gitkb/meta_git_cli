@@ -1,7 +1,7 @@
 use meta_core::config;
 use std::path::Path;
 
-/// Get project directories - uses passed-in list if non-empty, otherwise reads local .meta
+/// Get project directories - uses passed-in list if non-empty, otherwise reads local .meta.yaml
 pub(crate) fn get_project_directories_with_fallback(
     projects: &[String],
     cwd: &Path,
@@ -10,13 +10,13 @@ pub(crate) fn get_project_directories_with_fallback(
         // Use the projects list from meta_cli (supports --recursive)
         Ok(projects.to_vec())
     } else {
-        // Fall back to reading local .meta file
+        // Fall back to reading local .meta.yaml file
         get_project_directories(cwd)
     }
 }
 
 pub(crate) fn get_project_directories(cwd: &Path) -> anyhow::Result<Vec<String>> {
-    // Without a .meta there is only the root; a .meta that is refused is an
+    // Without a .meta.yaml there is only the root; a .meta.yaml that is refused is an
     // error, not a reason to act on the root alone
     if config::find_meta_config(cwd, None)?.is_none() {
         return Ok(vec![".".to_string()]);

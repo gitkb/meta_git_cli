@@ -9,7 +9,7 @@ pub(crate) fn execute_git_status(
     cwd: &Path,
 ) -> anyhow::Result<CommandResult> {
     // Return an execution plan - let loop_lib handle execution, dry-run, and JSON output
-    // Use projects from meta_cli if available (enables --recursive), otherwise read local .meta
+    // Use projects from meta_cli if available (enables --recursive), otherwise read local .meta.yaml
     let dirs = get_project_directories_with_fallback(projects, cwd)?;
 
     // Set git-specific environment variables (pager, colors, prompts)

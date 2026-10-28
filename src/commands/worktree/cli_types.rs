@@ -48,7 +48,7 @@ pub struct CreateArgs {
     #[arg(long = "repo", value_name = "ALIAS[:BRANCH]")]
     pub repos: Vec<RepoSpec>,
 
-    /// Add all repos from .meta config
+    /// Add all repos from .meta.yaml
     #[arg(long, conflicts_with = "repos")]
     pub all: bool,
 
@@ -96,9 +96,9 @@ pub struct CreateArgs {
 
     /// Resolve dependencies across the full nested meta tree
     ///
-    /// By default, dependencies are resolved from the current .meta level.
+    /// By default, dependencies are resolved from the current .meta.yaml level.
     /// With --recursive, walks up to the root meta directory and resolves
-    /// dependencies across all nested .meta workspaces. Repo aliases
+    /// dependencies across all nested .meta.yaml workspaces. Repo aliases
     /// use full paths from root (e.g., open-source/gitkb/core).
     #[arg(long, short = 'r')]
     pub recursive: bool,

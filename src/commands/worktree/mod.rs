@@ -206,7 +206,7 @@ fn write_worktree_help(w: &mut dyn std::io::Write) {
     let _ = writeln!(w, "  --repo <ALIAS[:BRANCH]>  Add specific repo(s)");
     let _ = writeln!(
         w,
-        "  --all                    Add all repos from .meta config"
+        "  --all                    Add all repos from .meta.yaml"
     );
     let _ = writeln!(w, "  --branch <NAME>          Override default branch name");
     let _ = writeln!(

@@ -29,7 +29,7 @@ fn build_loop_config(
     } else {
         let paths: Vec<PathBuf> = repos.iter().map(|r| r.path.clone()).collect();
         match meta_cli::worktree::set_config(wt_dir, &paths, None)? {
-            Some((config, _)) => {
+            Some(config) => {
                 let (projects, _) = meta_core::config::parse_meta_config(&config)?;
                 let tree = meta_cli::worktree::set_tree(wt_dir, &paths, &projects)?;
                 repo_filter::repo_names(wt_dir, &projects, &tree)

@@ -111,7 +111,7 @@ pub(crate) fn handle_create(
         );
     }
 
-    // Parse .meta to get project list
+    // Parse .meta.yaml to get project list
     // When --all is specified, include root repo "." if it's a git repository
     let projects = meta_git_lib::worktree::helpers::load_projects_with_root(&meta_dir, use_all)?;
 
@@ -831,7 +831,7 @@ fn build_nested_dep_graph(meta_dir: &std::path::Path) -> Result<DependencyGraph>
 /// The source of the project at `place` from `meta_dir`, reading only the
 /// configs of the meta repos on the way to it.
 fn project_at(meta_dir: &std::path::Path, place: &str) -> Result<Option<std::path::PathBuf>> {
-    let Some((config, _)) = meta_core::config::find_meta_config_in(meta_dir)? else {
+    let Some(config) = meta_core::config::find_meta_config_in(meta_dir)? else {
         return Ok(None);
     };
     let (projects, _) = meta_core::config::parse_meta_config(&config)?;

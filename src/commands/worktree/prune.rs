@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use meta_cli::worktree::discover_worktree_members;
-use meta_git_lib::worktree::helpers::{require_meta_dir, resolve_worktree_root};
+use meta_git_lib::worktree::helpers::{owner_dir, require_meta_dir, resolve_worktree_root};
 use meta_git_lib::worktree::hooks::fire_post_prune;
 use meta_git_lib::worktree::record::{self, SetRecord};
 use meta_git_lib::worktree::safety::{check_worktree_removal, delete_checked_set};
@@ -127,6 +127,9 @@ pub(crate) fn handle_prune(
     let dry_run = args.dry_run;
 
     let meta_dir = require_meta_dir()?;
+    // Hooks come from here: inside a set being pruned, its own config goes
+    // with it
+    let owner = owner_dir(&meta_dir);
     let workspace = Workspace::of(&meta_dir);
     let worktree_root = resolve_worktree_root(Some(&meta_dir))?;
     let (sets, mut kept) = find_sets(&workspace, &worktree_root);
@@ -320,7 +323,7 @@ pub(crate) fn handle_prune(
     }
 
     // Fire post-prune hook
-    fire_post_prune(&removed, Some(&meta_dir));
+    fire_post_prune(&removed, Some(&owner));
     once_each(&mut kept);
 
     if json {

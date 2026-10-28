@@ -16,6 +16,9 @@ pub(crate) fn handle_remove(args: DestroyArgs, verbose: bool, json: bool) -> Res
     let force = args.force;
 
     let meta_dir = require_meta_dir()?;
+    // Hooks come from here: inside the set being removed, its own config
+    // goes with it
+    let owner = owner_dir(&meta_dir);
     let worktree_root = resolve_worktree_root(Some(&meta_dir))?;
     let wt_dir = worktree_set_dir(&worktree_root, name)?;
 
@@ -86,7 +89,7 @@ pub(crate) fn handle_remove(args: DestroyArgs, verbose: bool, json: bool) -> Res
     delete_checked_set(&wt_dir, &check, force, verbose)?;
 
     // Fire post-destroy hook
-    fire_post_destroy(name, &wt_dir, force, Some(&meta_dir));
+    fire_post_destroy(name, &wt_dir, force, Some(&owner));
 
     if json {
         let output = DestroyOutput {

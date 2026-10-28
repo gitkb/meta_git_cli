@@ -263,9 +263,7 @@ pub(crate) fn handle_create(
     let mut created_repos = Vec::new();
     let mut new_branches = Vec::new();
     // The checkout whose sets these are: inside a set, the one it stands for
-    let owner = meta_core::config::set_source(&meta_dir)
-        .filter(|source| source.is_dir())
-        .unwrap_or_else(|| meta_dir.clone());
+    let owner = owner_dir(&meta_dir);
     let built = (|| -> Result<()> {
         // Each worktree gets this record as soon as it exists, so `remove`
         // and `prune` know meta made it; a worktree that can't be recorded
@@ -404,7 +402,7 @@ pub(crate) fn handle_create(
         ephemeral,
         ttl_seconds,
         &custom_meta,
-        Some(&meta_dir),
+        Some(&owner),
     );
 
     // Output

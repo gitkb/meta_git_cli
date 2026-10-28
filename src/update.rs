@@ -74,7 +74,7 @@ pub(crate) fn execute_git_update(
                         };
                         let shown = escape(&relative_path);
                         eprintln!(
-                            "{} {} exists locally but is not in .meta. To remove: rm -rf {}",
+                            "{} {} exists locally but is not in .meta.yaml. To remove: rm -rf {}",
                             style("⚠").yellow(),
                             style(&shown).yellow().bold(),
                             shown

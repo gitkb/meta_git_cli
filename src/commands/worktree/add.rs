@@ -2,7 +2,7 @@ use anyhow::Result;
 use colored::*;
 use meta_core::display::{escape, escape_path};
 
-use meta_cli::worktree::discover_worktree_repos_recursive;
+use meta_cli::worktree::discover_worktree_repos;
 use meta_git_lib::worktree::git_ops::git_worktree_add;
 use meta_git_lib::worktree::helpers::*;
 use meta_git_lib::worktree::record;
@@ -38,8 +38,7 @@ pub(crate) fn handle_add(args: AddArgs, verbose: bool, json: bool) -> Result<()>
     }
 
     // Check existing repos in the worktree
-    // Nested ones too (`parent/leaf`): a repo already in the set at any depth
-    let existing = discover_worktree_repos_recursive(&wt_dir)?;
+    let existing = discover_worktree_repos(&wt_dir)?;
 
     // What is added joins the set's record, if meta made the set; one it
     // didn't make stays unrecorded, so `remove` keeps refusing it.
@@ -76,12 +75,19 @@ pub(crate) fn handle_add(args: AddArgs, verbose: bool, json: bool) -> Result<()>
                 escape(&spec.alias)
             )
         })?;
-        // There already, under its place or where a link there leads
+        // There already, under its place or where a link there leads, or
+        // nested in a member (`parent/leaf`): its place holds something
         let real = |path: &std::path::Path| path.canonicalize().ok();
-        if existing.iter().any(|r| {
-            same_place(&r.alias, &place)
-                || (real(&r.path).is_some() && real(&r.path) == real(&dest))
-        }) {
+        let taken = std::fs::read_dir(&dest)
+            .map_or(dest.symlink_metadata().is_ok(), |mut entries| {
+                entries.next().is_some()
+            });
+        if taken
+            || existing.iter().any(|r| {
+                same_place(&r.alias, &place)
+                    || (real(&r.path).is_some() && real(&r.path) == real(&dest))
+            })
+        {
             anyhow::bail!(
                 "Repo '{}' already exists in worktree '{}'",
                 escape(&spec.alias),

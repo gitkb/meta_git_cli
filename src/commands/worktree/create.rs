@@ -234,8 +234,12 @@ pub(crate) fn handle_create(
                     escape(pr_branch)
                 )
             })?;
-        git_fetch_branch(source, pr_branch)
-            .map_err(|e| e.context(format!("Cannot fetch the PR branch into '{alias}'")))?;
+        git_fetch_branch(source, pr_branch).map_err(|e| {
+            e.context(format!(
+                "Cannot fetch the PR branch into '{}'",
+                escape(alias)
+            ))
+        })?;
         *branch = pr_branch.clone();
     }
 

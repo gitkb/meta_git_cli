@@ -31,10 +31,8 @@ fn build_loop_config(
         match meta_cli::worktree::set_config(wt_dir, &paths, None)? {
             Some((config, _)) => {
                 let (projects, _) = meta_core::config::parse_meta_config(&config)?;
-                let (made_from, own) = meta_cli::worktree::set_trees(wt_dir, &paths, &projects)?;
-                let mut names = repo_filter::repo_names(wt_dir, &projects, &made_from);
-                names.extend(repo_filter::repo_names(wt_dir, &projects, &own));
-                names
+                let tree = meta_cli::worktree::set_tree(wt_dir, &paths, &projects)?;
+                repo_filter::repo_names(wt_dir, &projects, &tree)
             }
             None => Vec::new(),
         }

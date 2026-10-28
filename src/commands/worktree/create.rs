@@ -598,6 +598,13 @@ fn print_create_dry_run(plan: &CreateDryRunPlan<'_>) {
         }
         println!("  {}:", escape(alias));
         println!("    source: {}", escape_path(source));
+        if alias != "."
+            && source
+                .symlink_metadata()
+                .is_ok_and(|m| m.file_type().is_symlink())
+        {
+            println!("    (a link: if the root checkout holds it, the repo goes where it leads)");
+        }
         println!("    dest:   {}", escape_path(&dest));
         println!("    branch: {}", escape(branch));
         println!("    bash:   {}", escape(&cmd));
@@ -670,7 +677,11 @@ fn resolve_repos_with_dependencies(
         for dep in deps {
             repos_to_include.insert(dep.to_string());
             if verbose {
-                eprintln!("  Including '{}' (dependency of '{}')", dep, resolved_alias);
+                eprintln!(
+                    "  Including '{}' (dependency of '{}')",
+                    escape(dep),
+                    escape(&resolved_alias)
+                );
             }
         }
     }
@@ -883,16 +894,18 @@ fn ensure_intermediate_parents(
             // repo the workspace doesn't list is not added (remove would
             // refuse it as foreign)
             let Some(parent_source) = project_at(meta_dir, &parent_alias)? else {
-                log::warn!(
-                    "Intermediate parent '{}' for nested repo '{}' is not a project of the workspace, skipping",
+                eprintln!(
+                    "{} Intermediate parent '{}' for nested repo '{}' is not a project of the workspace, skipping",
+                    "warning:".yellow().bold(),
                     escape(&parent_alias),
                     escape(alias)
                 );
                 continue;
             };
             if !parent_source.join(".git").exists() {
-                log::warn!(
-                    "Intermediate parent '{}' for nested repo '{}' is not cloned, skipping",
+                eprintln!(
+                    "{} Intermediate parent '{}' for nested repo '{}' is not cloned, skipping",
+                    "warning:".yellow().bold(),
                     escape(&parent_alias),
                     escape(alias)
                 );

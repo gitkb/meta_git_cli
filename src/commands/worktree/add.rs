@@ -76,22 +76,30 @@ pub(crate) fn handle_add(args: AddArgs, verbose: bool, json: bool) -> Result<()>
             )
         })?;
         // There already, under its place or where a link there leads, or
-        // nested in a member (`parent/leaf`): its place holds something
+        // nested in a member (`parent/leaf`); or its place holds other files
         let real = |path: &std::path::Path| path.canonicalize().ok();
-        let taken = std::fs::read_dir(&dest)
-            .map_or(dest.symlink_metadata().is_ok(), |mut entries| {
-                entries.next().is_some()
-            });
-        if taken
+        let member = dest.join(".git").symlink_metadata().is_ok()
             || existing.iter().any(|r| {
                 same_place(&r.alias, &place)
                     || (real(&r.path).is_some() && real(&r.path) == real(&dest))
-            })
-        {
+            });
+        if member {
             anyhow::bail!(
                 "Repo '{}' already exists in worktree '{}'",
                 escape(&spec.alias),
                 escape(name)
+            );
+        }
+        let taken = std::fs::read_dir(&dest)
+            .map_or(dest.symlink_metadata().is_ok(), |mut entries| {
+                entries.next().is_some()
+            });
+        if taken {
+            anyhow::bail!(
+                "{} in worktree '{}' already holds files that aren't a checkout of '{}'; move them away first",
+                escape_path(&dest),
+                escape(name),
+                escape(&spec.alias)
             );
         }
         planned.push((spec, source, place));

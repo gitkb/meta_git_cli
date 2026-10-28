@@ -20,7 +20,7 @@ pub(crate) fn execute_git_clone(
     let mut recursive = options.recursive;
     let mut parallel = 4_usize;
     let mut depth: Option<String> = options.depth.map(|d| d.to_string());
-    let mut meta_depth: Option<usize> = None; // Limit recursion depth for nested .meta files
+    let mut meta_depth: Option<usize> = None; // Limit recursion depth for nested .meta.yaml files
 
     let mut url = String::new();
     let mut dir_arg: Option<String> = None;
@@ -112,7 +112,7 @@ pub(crate) fn execute_git_clone(
 
     if dry_run {
         // Output what we know - just the meta repo clone command
-        // (Child repos are in .meta file which hasn't been cloned yet)
+        // (Child repos are in .meta.yaml file which hasn't been cloned yet)
         println!("{} Would clone meta repository:", style("[DRY RUN]").cyan());
         println!("  {}", meta_core::display::escape(&clone_cmd_str));
         return Ok(CommandResult::Message(String::new()));
@@ -148,7 +148,7 @@ pub(crate) fn execute_git_clone(
     let clone_dir_path = cwd.join(&clone_dir);
     if config::find_meta_config_in(&clone_dir_path)?.is_none() {
         return Ok(CommandResult::Message(
-            "No .meta config found in cloned repository".to_string(),
+            "No .meta.yaml found in cloned repository".to_string(),
         ));
     }
 
@@ -200,7 +200,7 @@ pub(crate) fn execute_git_clone(
     let (completed, total) = queue.get_counts();
     if total > initial_count {
         println!(
-            "Meta-repo clone completed ({} repos cloned, {} discovered via nested .meta files)",
+            "Meta-repo clone completed ({} repos cloned, {} discovered via nested .meta.yaml files)",
             completed,
             total - initial_count
         );

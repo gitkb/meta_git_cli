@@ -50,7 +50,11 @@ fn workspace(root: &Path, projects: &[&str]) -> std::path::PathBuf {
         git(&ws, &["clone", "-q", url.to_str().unwrap(), name]);
         config.insert(name.to_string(), json!(url));
     }
-    fs::write(ws.join(".meta"), json!({ "projects": config }).to_string()).unwrap();
+    fs::write(
+        ws.join(".meta.yaml"),
+        json!({ "projects": config }).to_string(),
+    )
+    .unwrap();
     fs::write(
         ws.join(".gitignore"),
         format!("{}\n.worktrees/\n", projects.join("\n")),
@@ -155,7 +159,7 @@ fn remove_refuses_directories_meta_did_not_create() {
     // worktrees_dir "." would make the primary clone `a` look like a worktree.
     // Such a config is refused, so the primary checkout is never deleted.
     let config = json!({"worktrees_dir": ".", "projects": {"a": "unused"}});
-    fs::write(ws.join(".meta"), config.to_string()).unwrap();
+    fs::write(ws.join(".meta.yaml"), config.to_string()).unwrap();
     let out = worktree(root, &ws, &["remove", "a", "--force"]);
     assert!(!out.status.success());
     assert!(
@@ -169,7 +173,7 @@ fn remove_refuses_directories_meta_did_not_create() {
     // the primary clone `a` looks like a set. The removal check refuses a
     // primary checkout.
     fs::write(
-        ws.join(".meta"),
+        ws.join(".meta.yaml"),
         json!({"projects": {"a": "unused"}}).to_string(),
     )
     .unwrap();
@@ -211,7 +215,7 @@ fn remove_checks_repos_nested_in_other_repos() {
     );
     let leaf_url = up.join("leaf.git");
     fs::write(
-        sub.join(".meta"),
+        sub.join(".meta.yaml"),
         json!({"projects": {"leaf": leaf_url}}).to_string(),
     )
     .unwrap();
@@ -219,7 +223,7 @@ fn remove_checks_repos_nested_in_other_repos() {
     git(&sub, &["add", "."]);
     git(&sub, &["commit", "-qm", "meta"]);
     let config = json!({"projects": {"sub": {"repo": up.join("sub.git"), "meta": true}}});
-    fs::write(ws.join(".meta"), config.to_string()).unwrap();
+    fs::write(ws.join(".meta.yaml"), config.to_string()).unwrap();
     fs::write(ws.join(".gitignore"), "sub/\n.worktrees/\n").unwrap();
     git(&ws, &["commit", "-qam", "sub"]);
 
@@ -374,7 +378,7 @@ fn hook_with_large_stderr_output_does_not_hang_create() {
     // More than any pipe buffer (64 KiB by default, 1 MiB at most).
     let hook = "head -c 4000000 /dev/zero >&2";
     let config = json!({"projects": {"a": "unused"}, "worktree": {"hooks": {"post-create": hook}}});
-    fs::write(ws.join(".meta"), config.to_string()).unwrap();
+    fs::write(ws.join(".meta.yaml"), config.to_string()).unwrap();
 
     let (tx, rx) = std::sync::mpsc::channel();
     let (root_path, ws_path) = (root.to_path_buf(), ws.clone());
@@ -436,7 +440,7 @@ fn from_pr_applies_only_to_the_exact_repo() {
     );
     let config =
         json!({"projects": {"legacy": up.join("api-legacy.git"), "service": up.join("api.git")}});
-    fs::write(ws.join(".meta"), config.to_string()).unwrap();
+    fs::write(ws.join(".meta.yaml"), config.to_string()).unwrap();
     fs::write(ws.join(".gitignore"), "legacy\nservice\n.worktrees/\n").unwrap();
     git(&ws, &["add", "."]);
     git(&ws, &["commit", "-qm", "meta"]);
@@ -499,7 +503,7 @@ fn update_reports_failed_clones_and_exits_nonzero() {
         "good": root.join("good.git"),
         "missing": root.join("does-not-exist.git"),
     }});
-    fs::write(ws.join(".meta"), config.to_string()).unwrap();
+    fs::write(ws.join(".meta.yaml"), config.to_string()).unwrap();
 
     let out = meta_git(root, &ws, "git update", &[], json!({}));
     assert!(!out.status.success());
@@ -718,7 +722,7 @@ fn remove_works_when_the_worktrees_dir_is_a_link() {
     fs::create_dir(ws.join("real")).unwrap();
     std::os::unix::fs::symlink(ws.join("real"), ws.join("link")).unwrap();
     let config = json!({"worktrees_dir": "link", "projects": {"a": "unused"}});
-    fs::write(ws.join(".meta"), config.to_string()).unwrap();
+    fs::write(ws.join(".meta.yaml"), config.to_string()).unwrap();
 
     let out = worktree(root, &ws, &["create", "t", "--repo", "a", "--no-deps"]);
     assert!(out.status.success(), "{}", stderr(&out));
@@ -1037,9 +1041,9 @@ fn prune_reports_repositories_it_could_not_search() {
     // A nested meta project whose config can't be parsed stops the walk
     // over the workspace's repositories
     let config = json!({"projects": {"a": "unused", "g": {"repo": "unused", "meta": true}}});
-    fs::write(ws.join(".meta"), config.to_string()).unwrap();
+    fs::write(ws.join(".meta.yaml"), config.to_string()).unwrap();
     fs::create_dir(ws.join("g")).unwrap();
-    fs::write(ws.join("g/.meta"), "not json").unwrap();
+    fs::write(ws.join("g/.meta.yaml"), "not json").unwrap();
 
     let out = meta_git(
         root,
@@ -1085,7 +1089,7 @@ fn prune_finds_sets_of_a_separate_git_dir_repository() {
         &["commit", "-q", "--allow-empty", "-m", "init"],
     );
     fs::write(
-        ws.join(".meta"),
+        ws.join(".meta.yaml"),
         json!({"projects": {"s": "unused"}}).to_string(),
     )
     .unwrap();
@@ -1214,7 +1218,7 @@ fn prune_reports_a_linked_checkout_whose_git_metadata_it_cannot_read() {
         ],
     );
     fs::write(
-        ws.join(".meta"),
+        ws.join(".meta.yaml"),
         json!({"projects": {"a": "unused"}}).to_string(),
     )
     .unwrap();
@@ -1270,7 +1274,7 @@ fn prune_finds_sets_of_a_bare_repository() {
     upstream(&url);
     git(&ws, &["clone", "-q", "--bare", url.to_str().unwrap(), "b"]);
     fs::write(
-        ws.join(".meta"),
+        ws.join(".meta.yaml"),
         json!({"projects": {"b": "unused"}}).to_string(),
     )
     .unwrap();

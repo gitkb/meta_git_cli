@@ -114,7 +114,7 @@ pub(crate) fn handle_list(
             .to_path_buf(),
         _ => {
             let meta_dir = meta_cli::config::find_meta_config(&cwd, None)?
-                .and_then(|(path, _)| path.parent().map(std::path::Path::to_path_buf));
+                .and_then(|path| path.parent().map(std::path::Path::to_path_buf));
             let root = resolve_worktree_root(Some(meta_dir.as_deref().unwrap_or(&cwd)))?;
             if root.is_absolute() {
                 root

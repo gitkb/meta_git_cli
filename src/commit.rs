@@ -41,9 +41,9 @@ pub(crate) fn execute_git_commit(
         projects.to_vec()
     } else {
         // Fall back to reading local meta config
-        let Some((meta_path, _format)) = config::find_meta_config_in(cwd)? else {
+        let Some(meta_path) = config::find_meta_config_in(cwd)? else {
             return Ok(CommandResult::Message(format!(
-                "No .meta config found in {}",
+                "No .meta.yaml found in {}",
                 escape_path(cwd)
             )));
         };

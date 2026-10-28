@@ -18,10 +18,10 @@ pub(crate) fn execute_git_update(
     // Determine if we're in recursive mode (projects list provided by meta_cli)
     let recursive = !projects.is_empty();
 
-    // Build list of directories to check for .meta files
+    // Build list of directories to check for .meta.yaml files
     let dirs_to_check: Vec<PathBuf> = if recursive {
-        // In recursive mode, check each directory that has a .meta file
-        // A .meta that can't be examined is an error, not "no nested repos"
+        // In recursive mode, check each directory that has a .meta.yaml file
+        // A .meta.yaml that can't be examined is an error, not "no nested repos"
         let mut dirs = Vec::new();
         for p in projects {
             let path = if p == "." {
@@ -46,7 +46,7 @@ pub(crate) fn execute_git_update(
 
     // First pass: check for orphaned repos and warn user
     for dir in &dirs_to_check {
-        let Some((meta_path, _format)) = config::find_meta_config_in(dir)? else {
+        let Some(meta_path) = config::find_meta_config_in(dir)? else {
             continue;
         };
 
@@ -55,7 +55,7 @@ pub(crate) fn execute_git_update(
             Err(_) => continue,
         };
 
-        // Check for orphaned repositories (exist locally but not in .meta)
+        // Check for orphaned repositories (exist locally but not in .meta.yaml)
         let config_projects: HashSet<String> = projects.iter().map(|p| p.path.clone()).collect();
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
@@ -89,7 +89,7 @@ pub(crate) fn execute_git_update(
     let meta_depth = if recursive { None } else { Some(0) };
     let queue = Arc::new(CloneQueue::new(None, meta_depth)); // No git depth for update
 
-    // Seed the queue from all known .meta files
+    // Seed the queue from all known .meta.yaml files
     for dir in &dirs_to_check {
         // Determine relative depth based on whether it's the cwd or nested
         let depth_level = if dir.as_path() == cwd { 0 } else { 1 };
@@ -154,7 +154,7 @@ pub(crate) fn execute_git_update(
     let (completed, total) = queue.get_counts();
     if total > initial_count {
         println!(
-            "Update completed ({} repos cloned, {} discovered via nested .meta files)",
+            "Update completed ({} repos cloned, {} discovered via nested .meta.yaml files)",
             completed,
             total - initial_count
         );

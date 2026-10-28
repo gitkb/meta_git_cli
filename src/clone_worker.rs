@@ -29,7 +29,7 @@ pub(crate) fn clone_with_queue(
     let work_signal = Arc::new((Mutex::new(false), Condvar::new()));
 
     let ssh_cmd = Arc::new(ssh_cmd.map(|s| s.to_string()));
-    // Nested .meta configs that failed to parse or validate
+    // Nested .meta.yaml files that failed to parse or validate
     let nested_errors = Arc::new(Mutex::new(Vec::new()));
 
     // Spawn worker threads
@@ -116,7 +116,7 @@ pub(crate) fn clone_with_queue(
             .map(|summary| format!("\n{summary}"))
             .unwrap_or_default();
         anyhow::bail!(
-            "Could not read nested .meta configs:\n{}{failed}",
+            "Could not read nested .meta.yaml files:\n{}{failed}",
             errors.join("\n")
         );
     }
@@ -154,7 +154,7 @@ pub(crate) fn report_failures(queue: &CloneQueue) -> Option<String> {
     ))
 }
 
-/// Clone a single repository and handle .meta discovery
+/// Clone a single repository and handle .meta.yaml discovery
 fn clone_single_repo(
     task: &CloneTask,
     queue: &Arc<CloneQueue>,
@@ -180,10 +180,10 @@ fn clone_single_repo(
             "{}",
             style(format!("Skipped {} (exists)", task.name)).yellow()
         ));
-        // Still mark as completed and check for nested .meta
+        // Still mark as completed and check for nested .meta.yaml
         if let Err(e) = queue.mark_completed(task) {
             debug!(
-                "Failed to check nested .meta for {}: {}",
+                "Failed to check nested .meta.yaml for {}: {}",
                 task.name,
                 meta_core::display::escape_lines(&format!("{e:#}"))
             );
@@ -221,7 +221,7 @@ fn clone_single_repo(
             let status = child.wait();
             match status {
                 Ok(status) if status.success() => {
-                    // Check for nested .meta and report new discoveries
+                    // Check for nested .meta.yaml and report new discoveries
                     match queue.mark_completed(task) {
                         Ok(added) if added > 0 => {
                             let (_, total) = queue.get_counts();

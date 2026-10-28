@@ -1,7 +1,7 @@
 use anyhow::Result;
 use colored::*;
 use meta_core::display::escape_lines;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use meta_cli::repo_filter;
 use meta_cli::worktree::{discover_worktree_repos, WorktreeRepoInfo};
@@ -22,13 +22,27 @@ fn build_loop_config(
     json: bool,
 ) -> Result<loop_lib::LoopConfig> {
     let directories: Vec<String> = repos.iter().map(|r| r.path.display().to_string()).collect();
-    // A member sits at its alias, so its path in the set is its name
+    // A set lays its repos out as the workspace, so the set's config names
+    // them, by project name or path; only a filter reads it
+    let names = if include_filters.is_empty() && exclude_filters.is_empty() {
+        Vec::new()
+    } else {
+        let paths: Vec<PathBuf> = repos.iter().map(|r| r.path.clone()).collect();
+        match meta_cli::worktree::set_config(wt_dir, &paths, None)? {
+            Some((config, _)) => {
+                let (projects, _) = meta_core::config::parse_meta_config(&config)?;
+                let tree = meta_cli::worktree::set_tree(wt_dir, &paths, &projects)?;
+                repo_filter::repo_names(wt_dir, &projects, &tree)
+            }
+            None => Vec::new(),
+        }
+    };
     let directories = repo_filter::select(
         &include_filters,
         &exclude_filters,
         &directories,
         wt_dir,
-        &[],
+        &names,
     )?;
     Ok(loop_lib::LoopConfig {
         directories,

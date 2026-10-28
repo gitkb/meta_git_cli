@@ -114,7 +114,7 @@ pub(crate) fn execute_git_clone(
         // Output what we know - just the meta repo clone command
         // (Child repos are in .meta file which hasn't been cloned yet)
         println!("{} Would clone meta repository:", style("[DRY RUN]").cyan());
-        println!("  {clone_cmd_str}");
+        println!("  {}", meta_core::display::escape(&clone_cmd_str));
         return Ok(CommandResult::Message(String::new()));
     }
 
@@ -124,7 +124,10 @@ pub(crate) fn execute_git_clone(
         ssh_setup::SshMasters::UserManaged | ssh_setup::SshMasters::Failed => None,
     };
 
-    println!("Cloning meta repository: {url}");
+    println!(
+        "Cloning meta repository: {}",
+        meta_core::display::escape(&url)
+    );
     let mut clone_cmd = Command::new("git");
     clone_cmd.arg("clone").args(&git_clone_args).arg(&url);
     if let Some(ref dir) = dir_arg {

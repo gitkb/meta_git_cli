@@ -89,7 +89,8 @@ pub struct CreateArgs {
     ///
     /// By default, worktree create includes the root repo and resolves
     /// dependencies via provides/depends_on from .meta.yaml.
-    /// Use --no-deps to include only explicitly specified repos.
+    /// Use --no-deps to include only the named repos (and, for a repo nested
+    /// inside another project's path, that parent project).
     #[arg(long)]
     pub no_deps: bool,
 
@@ -169,8 +170,8 @@ pub struct ExecArgs {
     /// Start from a specific commit-ish (ephemeral only)
     pub commit_ish: Option<String>,
 
-    /// Only run in these repos (comma-separated): each value is a repo's alias,
-    /// its whole path in the set (. for the root), never part of one
+    /// Only run in these repos (comma-separated): each value is a repo's name,
+    /// or its whole path in the set (. for the root), never part of one
     #[arg(long, value_delimiter = ',')]
     pub include: Vec<String>,
 

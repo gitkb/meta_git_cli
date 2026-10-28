@@ -13,7 +13,7 @@ mod status;
 use anyhow::Result;
 use clap::Parser;
 use colored::*;
-use meta_core::display::escape_lines;
+use meta_core::display::{escape, escape_lines};
 use meta_plugin_protocol::{CommandResult, PluginRequestOptions};
 use std::path::Path;
 
@@ -105,8 +105,12 @@ pub fn execute_worktree_command(
                     CommandResult::Message(String::new())
                 }
                 _ => {
-                    // Actual parse errors
-                    CommandResult::ShowHelp(Some(e.to_string()))
+                    // Actual parse errors: clap's message names the problem
+                    // and where to get help; the whole git help would bury it
+                    let message =
+                        meta_cli::args::escaped_error::<WorktreeParser>(&clap_args).to_string();
+                    let message = message.strip_prefix("error: ").unwrap_or(&message);
+                    CommandResult::Error(message.trim_end().to_string())
                 }
             }
         }
@@ -133,7 +137,7 @@ fn handle_worktree_command(
         WorktreeCommands::Exec(args) => exec::handle_exec(args, verbose, json),
         WorktreeCommands::Prune(args) => prune::handle_prune(args, verbose, json, global_strict),
         WorktreeCommands::Unknown(args) => {
-            let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
+            let cmd = escape(args.first().map(|s| s.as_str()).unwrap_or(""));
             eprintln!(
                 "{}: unrecognized worktree subcommand '{cmd}'",
                 "error".red().bold(),

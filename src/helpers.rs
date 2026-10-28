@@ -18,7 +18,7 @@ pub(crate) fn get_project_directories_with_fallback(
 pub(crate) fn get_project_directories(cwd: &Path) -> anyhow::Result<Vec<String>> {
     // Without a .meta there is only the root; a .meta that is refused is an
     // error, not a reason to act on the root alone
-    if config::find_meta_config(cwd, None).is_none() {
+    if config::find_meta_config(cwd, None)?.is_none() {
         return Ok(vec![".".to_string()]);
     }
     let tree = config::walk_meta_tree(cwd, Some(0))?;

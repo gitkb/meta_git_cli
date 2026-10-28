@@ -43,7 +43,10 @@ pub(crate) fn handle_create(
         } else {
             super::warn_or_bail(
                 strict,
-                format!("--meta value '{s}' missing '=' separator (expected key=value), skipping"),
+                format!(
+                    "--meta value '{}' missing '=' separator (expected key=value), skipping",
+                    escape(s)
+                ),
             )?;
         }
     }
@@ -91,7 +94,7 @@ pub(crate) fn handle_create(
 
     let nearest_meta_dir = require_meta_dir()?;
     let meta_dir = if recursive {
-        meta_core::config::find_root_meta_dir(&nearest_meta_dir)
+        meta_core::config::find_root_meta_dir(&nearest_meta_dir)?
     } else {
         nearest_meta_dir
     };
@@ -114,18 +117,28 @@ pub(crate) fn handle_create(
 
     // Determine which repos to include: Vec<(alias, source_path, branch)>
     let repos_to_create: Vec<(String, std::path::PathBuf, String)> = if use_all {
-        projects
+        let mut all: Vec<(String, std::path::PathBuf)> = projects
             .iter()
-            .map(|p| {
+            .filter(|p| !recursive || p.name == ".")
+            .map(|p| (p.name.clone(), meta_dir.join(&p.path)))
+            .collect();
+        // --recursive: every repo of the nested tree, by its full path
+        if recursive {
+            let tree = meta_core::config::walk_meta_tree(&meta_dir, None)?;
+            all.extend(
+                meta_core::config::build_project_map(&tree, &meta_dir, "")
+                    .into_iter()
+                    .map(|(alias, (source, _))| (alias, source)),
+            );
+        }
+        all.into_iter()
+            .map(|(alias, source)| {
                 let per_branch = repo_specs
                     .iter()
-                    .find(|r| r.alias == p.name)
+                    .find(|r| r.alias == alias)
                     .and_then(|r| r.branch.as_deref());
-                (
-                    p.name.clone(),
-                    meta_dir.join(&p.path),
-                    resolve_branch(name, branch_flag, per_branch),
-                )
+                let branch = resolve_branch(name, branch_flag, per_branch);
+                (alias, source, branch)
             })
             .collect()
     } else if no_deps {
@@ -165,13 +178,37 @@ pub(crate) fn handle_create(
     // parents ("gitkb") get worktrees too — the thin spine from root to target.
     let mut repos_to_create =
         ensure_intermediate_parents(&meta_dir, repos_to_create, name, branch_flag)?;
-    // One worktree per alias: a repeated --repo would try the same add twice
+    // One worktree per place in the set: a repeated --repo, or a repo named
+    // both by its name and by its path, would try the same add twice
+    let mut branches: HashMap<String, &str> = HashMap::new();
+    for (alias, source, branch) in &repos_to_create {
+        let place = place_in_set(&meta_dir, alias, source);
+        match branches.get(place.as_str()) {
+            Some(first) if *first != branch.as_str() => anyhow::bail!(
+                "Repo '{}' is given twice, on branches '{}' and '{}'",
+                escape(&place),
+                escape(first),
+                escape(branch)
+            ),
+            Some(_) => {}
+            None => {
+                branches.insert(place, branch);
+            }
+        }
+    }
     let mut seen = HashSet::new();
-    repos_to_create.retain(|(alias, _, _)| seen.insert(alias.clone()));
+    repos_to_create
+        .retain(|(alias, source, _)| seen.insert(place_in_set(&meta_dir, alias, source)));
+    // A repo goes in before any repo inside it, whatever order they were named in
+    repos_to_create.sort_by_key(|(alias, source, _)| {
+        let place = place_in_set(&meta_dir, alias, source);
+        (alias != ".", place.split('/').count())
+    });
 
     if dry_run {
         let plan = CreateDryRunPlan {
             name,
+            meta_dir: &meta_dir,
             wt_dir: &wt_dir,
             repos_to_create: &repos_to_create,
             from_ref,
@@ -192,11 +229,17 @@ pub(crate) fn handle_create(
             .find(|(alias, source, _)| alias != "." && repo_matches_spec(source, pr_repo_spec))
             .ok_or_else(|| {
                 anyhow::anyhow!(
-                    "No selected repo has origin '{pr_repo_spec}', so PR branch '{pr_branch}' can't be applied"
+                    "No selected repo has origin '{}', so PR branch '{}' can't be applied",
+                    escape(pr_repo_spec),
+                    escape(pr_branch)
                 )
             })?;
-        git_fetch_branch(source, pr_branch)
-            .map_err(|e| e.context(format!("Cannot fetch the PR branch into '{alias}'")))?;
+        git_fetch_branch(source, pr_branch).map_err(|e| {
+            e.context(format!(
+                "Cannot fetch the PR branch into '{}'",
+                escape(alias)
+            ))
+        })?;
         *branch = pr_branch.clone();
     }
 
@@ -219,6 +262,8 @@ pub(crate) fn handle_create(
     // Anything that fails from here rolls back what this call created.
     let mut created_repos = Vec::new();
     let mut new_branches = Vec::new();
+    // The checkout whose sets these are: inside a set, the one it stands for
+    let owner = owner_dir(&meta_dir);
     let built = (|| -> Result<()> {
         // Each worktree gets this record as soon as it exists, so `remove`
         // and `prune` know meta made it; a worktree that can't be recorded
@@ -227,7 +272,9 @@ pub(crate) fn handle_create(
             set: wt_dir
                 .canonicalize()
                 .with_context(|| format!("Cannot resolve {}", escape_path(&wt_dir)))?,
-            project: meta_dir.clone(),
+            // Inside a set, the checkout it stands for: a record never names
+            // a set's checkout, which can be removed before this set
+            project: owner.clone(),
             created_at: Utc::now().to_rfc3339(),
             ephemeral,
             ttl_seconds,
@@ -243,7 +290,10 @@ pub(crate) fn handle_create(
         if let Some((_, source, branch)) = repos_to_create.iter().find(|(a, _, _)| a == ".") {
             if let Some(r) = missing_ref(source, from_ref)? {
                 // --from-ref: skip root repo if ref doesn't exist (same as child repos)
-                super::warn_or_bail(strict, format!("Skipping '.': ref '{r}' not found"))?;
+                super::warn_or_bail(
+                    strict,
+                    format!("Skipping '.': ref '{}' not found", escape(r)),
+                )?;
             } else {
                 if verbose {
                     eprintln!(
@@ -272,18 +322,22 @@ pub(crate) fn handle_create(
             }
             if let Some(r) = missing_ref(source, from_ref)? {
                 // --from-ref: skip repos where ref doesn't exist
-                super::warn_or_bail(strict, format!("Skipping '{alias}': ref '{r}' not found"))?;
+                super::warn_or_bail(
+                    strict,
+                    format!(
+                        "Skipping '{}': ref '{}' not found",
+                        escape(alias),
+                        escape(r)
+                    ),
+                )?;
                 continue;
             }
 
-            // Preserve the full alias as the destination path so that relative
-            // references (e.g., Cargo.toml workspace members) remain valid.
-            // "vendor/tree-sitter-markdown" -> "vendor/tree-sitter-markdown"
-            // Simple aliases are unchanged: "core" -> "core"
-            let dest = wt_dir.join(alias);
+            // The repo goes where it is in the workspace
+            let place = place_in_set(&meta_dir, alias, source);
             // A checkout already in the worktree (such as the root repo's) may
             // hold a symlink where this one goes; git must not follow it out
-            meta_core::config::resolve_inside(&wt_dir, alias).map_err(|why| {
+            let dest = dest_in_set(&wt_dir, &place).map_err(|why| {
                 anyhow::anyhow!(
                     "Refusing to add the worktree for '{}': {why}",
                     escape(alias)
@@ -322,7 +376,10 @@ pub(crate) fn handle_create(
         if created_repos.is_empty() {
             // Every repo was skipped because none has the ref.
             match from_ref {
-                Some(r) => anyhow::bail!("No selected repo has ref '{r}'; no worktree was created"),
+                Some(r) => anyhow::bail!(
+                    "No selected repo has ref '{}'; no worktree was created",
+                    escape(r)
+                ),
                 None => anyhow::bail!("No repos selected; no worktree was created"),
             }
         }
@@ -332,7 +389,8 @@ pub(crate) fn handle_create(
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or(".worktrees");
-        ensure_worktrees_in_gitignore(&meta_dir, dirname, json)
+        // in the checkout whose sets these are
+        ensure_worktrees_in_gitignore(&owner, dirname, json)
     })();
     built.map_err(|e| roll_back(&wt_dir, &new_branches, e))?;
 
@@ -344,7 +402,7 @@ pub(crate) fn handle_create(
         ephemeral,
         ttl_seconds,
         &custom_meta,
-        Some(&meta_dir),
+        Some(&owner),
     );
 
     // Output
@@ -428,9 +486,9 @@ fn journal_new_branch(
 
 /// Undo a failed create: delete the set this call claimed, if the removal
 /// check finds nothing to lose, and the branches it created, if they still
-/// point where it left them. A record that can't be used (one whose write
-/// failed, say) doesn't stop it: this call made the set, so it needs no
-/// proof of that. Returns the error to report.
+/// point where it left them. A record that can't be used or is missing (one
+/// whose write failed, say) doesn't stop it: this call made the set, so it
+/// needs no proof of that. Returns the error to report.
 fn roll_back(
     wt_dir: &std::path::Path,
     new_branches: &[(std::path::PathBuf, String, String)],
@@ -440,7 +498,7 @@ fn roll_back(
         let blockers = check
             .blockers
             .iter()
-            .filter(|b| !check.unusable_records.contains(b));
+            .filter(|b| !check.unusable_records.contains(b) && !check.missing_records.contains(b));
         let problems: Vec<String> = blockers.chain(&check.unsaved).cloned().collect();
         anyhow::ensure!(problems.is_empty(), "{}", problems.join("; "));
         delete_checked_set(wt_dir, &check, false, false)
@@ -476,6 +534,7 @@ fn roll_back(
 
 struct CreateDryRunPlan<'a> {
     name: &'a str,
+    meta_dir: &'a std::path::Path,
     wt_dir: &'a std::path::Path,
     repos_to_create: &'a [(String, std::path::PathBuf, String)],
     from_ref: Option<&'a str>,
@@ -494,10 +553,13 @@ fn print_create_dry_run(plan: &CreateDryRunPlan<'_>) {
     println!();
 
     if let Some(from_ref) = plan.from_ref {
-        println!("Start ref: {from_ref}");
+        println!("Start ref: {}", escape(from_ref));
     }
     if let Some(from_pr_spec) = plan.from_pr_spec {
-        println!("PR source: would resolve {from_pr_spec} and fetch the matching head branch");
+        println!(
+            "PR source: would resolve {} and fetch the matching head branch",
+            escape(from_pr_spec)
+        );
     }
     if plan.ephemeral {
         println!("Ephemeral: true");
@@ -510,7 +572,7 @@ fn print_create_dry_run(plan: &CreateDryRunPlan<'_>) {
             "Metadata: {}",
             plan.custom_meta
                 .iter()
-                .map(|(k, v)| format!("{k}={v}"))
+                .map(|(k, v)| format!("{}={}", escape(k), escape(v)))
                 .collect::<Vec<_>>()
                 .join(", ")
         );
@@ -524,7 +586,7 @@ fn print_create_dry_run(plan: &CreateDryRunPlan<'_>) {
         let dest = if alias == "." {
             plan.wt_dir.to_path_buf()
         } else {
-            plan.wt_dir.join(alias)
+            plan.wt_dir.join(place_in_set(plan.meta_dir, alias, source))
         };
         let mut cmd = format!(
             "git -C {} worktree add -b {} {}",
@@ -538,6 +600,13 @@ fn print_create_dry_run(plan: &CreateDryRunPlan<'_>) {
         }
         println!("  {}:", escape(alias));
         println!("    source: {}", escape_path(source));
+        if alias != "."
+            && source
+                .symlink_metadata()
+                .is_ok_and(|m| m.file_type().is_symlink())
+        {
+            println!("    (a link: if the root checkout holds it, the repo goes where it leads)");
+        }
         println!("    dest:   {}", escape_path(&dest));
         println!("    branch: {}", escape(branch));
         println!("    bash:   {}", escape(&cmd));
@@ -610,7 +679,11 @@ fn resolve_repos_with_dependencies(
         for dep in deps {
             repos_to_include.insert(dep.to_string());
             if verbose {
-                eprintln!("  Including '{}' (dependency of '{}')", dep, resolved_alias);
+                eprintln!(
+                    "  Including '{}' (dependency of '{}')",
+                    escape(dep),
+                    escape(&resolved_alias)
+                );
             }
         }
     }
@@ -696,13 +769,13 @@ fn resolve_alias_in_graph(graph: &DependencyGraph, alias: &str) -> Result<String
         0 => anyhow::bail!(
             "Repo '{}' not found in the recursive project graph. \
              With --recursive, use the full path from root (e.g., 'open-source/gitkb/core').",
-            alias
+            escape(alias)
         ),
         _ => anyhow::bail!(
             "Repo alias '{}' is ambiguous — matches: {}. \
              Use the full path to disambiguate.",
-            alias,
-            matches.join(", ")
+            escape(alias),
+            escape(&matches.join(", "))
         ),
     }
 }
@@ -755,6 +828,26 @@ fn build_nested_dep_graph(meta_dir: &std::path::Path) -> Result<DependencyGraph>
     DependencyGraph::build(project_deps)
 }
 
+/// The source of the project at `place` from `meta_dir`, reading only the
+/// configs of the meta repos on the way to it.
+fn project_at(meta_dir: &std::path::Path, place: &str) -> Result<Option<std::path::PathBuf>> {
+    let Some((config, _)) = meta_core::config::find_meta_config_in(meta_dir)? else {
+        return Ok(None);
+    };
+    let (projects, _) = meta_core::config::parse_meta_config(&config)?;
+    for project in &projects {
+        if project.path == place {
+            return Ok(Some(meta_dir.join(&project.path)));
+        }
+        if let Some(rest) = place.strip_prefix(&format!("{}/", project.path)) {
+            if let Some(found) = project_at(&meta_dir.join(&project.path), rest)? {
+                return Ok(Some(found));
+            }
+        }
+    }
+    Ok(None)
+}
+
 /// Ensure intermediate `meta: true` parent repos get worktrees for nested aliases.
 ///
 /// When `repos_to_create` contains a nested alias like `"gitkb/core"`, the
@@ -770,20 +863,27 @@ fn ensure_intermediate_parents(
     worktree_name: &str,
     branch_flag: Option<&str>,
 ) -> Result<Vec<(String, std::path::PathBuf, String)>> {
-    let existing: HashSet<String> = repos.iter().map(|(a, _, _)| a.clone()).collect();
+    // Where the selected repos go: a parent is there when a repo is at its
+    // path, whatever name selected it
+    let existing: HashSet<String> = repos
+        .iter()
+        .map(|(a, s, _)| place_in_set(meta_dir, a, s))
+        .collect();
 
     let mut to_add: Vec<(String, std::path::PathBuf, String)> = Vec::new();
     let mut added: HashSet<String> = HashSet::new();
 
-    for (alias, _source, _branch) in &repos {
-        // Only nested aliases need intermediate parents
-        if !alias.contains('/') {
+    for (alias, source, _branch) in &repos {
+        // Only a repo nested in the set needs its parents: they follow from
+        // where it goes, not from its name
+        let place = place_in_set(meta_dir, alias, source);
+        if !place.contains('/') {
             continue;
         }
 
         // Walk up through path segments: "gitkb/core" → check "gitkb"
         // "a/b/c" → check "a", "a/b"
-        let parts: Vec<&str> = alias.split('/').collect();
+        let parts: Vec<&str> = place.split('/').collect();
         for i in 1..parts.len() {
             let parent_alias = parts[..i].join("/");
 
@@ -792,44 +892,29 @@ fn ensure_intermediate_parents(
                 continue;
             }
 
-            // Resolve the parent's source path via config lookup (respects custom
-            // `path` settings) with a fallback to direct path joining.
-            // A fallback directory must lie inside the workspace and not be a
-            // symlink: it becomes a source repo for git
-            let parent_source = match lookup_nested_project(meta_dir, &parent_alias) {
-                Ok((source, _project)) => source,
-                Err(_) => {
-                    let candidate = meta_dir.join(&parent_alias);
-                    let is_link = candidate
-                        .symlink_metadata()
-                        .is_ok_and(|meta| meta.file_type().is_symlink());
-                    if is_link
-                        || meta_core::config::resolve_inside(meta_dir, &parent_alias).is_err()
-                    {
-                        log::warn!(
-                            "Intermediate parent '{}' is not a plain directory inside the workspace, skipping",
-                            escape(&parent_alias)
-                        );
-                        continue;
-                    }
-                    candidate
+            // A parent is the project at that path, not one by that name; a
+            // repo the workspace doesn't list is not added (remove would
+            // refuse it as foreign)
+            let Some(parent_source) = project_at(meta_dir, &parent_alias)? else {
+                // A plain directory on the way is no parent; a repo that
+                // isn't a project is worth saying so
+                if !meta_dir.join(&parent_alias).join(".git").exists() {
+                    continue;
                 }
-            };
-            if !parent_source.exists() {
-                log::warn!(
-                    "Intermediate parent '{}' for nested repo '{}' not found at {:?}, skipping",
-                    parent_alias,
-                    alias,
-                    parent_source
+                eprintln!(
+                    "{} Intermediate parent '{}' for nested repo '{}' is not a project of the workspace, skipping",
+                    "warning:".yellow().bold(),
+                    escape(&parent_alias),
+                    escape(alias)
                 );
                 continue;
-            }
-
-            // Only add if it's actually a git repo (has .git dir or .git file)
+            };
             if !parent_source.join(".git").exists() {
-                log::warn!(
-                    "Intermediate parent '{}' for nested repo '{}' exists but is not a git repo (no .git), skipping",
-                    parent_alias, alias
+                eprintln!(
+                    "{} Intermediate parent '{}' for nested repo '{}' is not cloned, skipping",
+                    "warning:".yellow().bold(),
+                    escape(&parent_alias),
+                    escape(alias)
                 );
                 continue;
             }
@@ -837,8 +922,8 @@ fn ensure_intermediate_parents(
             let branch = resolve_branch(worktree_name, branch_flag, None);
             log::info!(
                 "Adding intermediate parent '{}' for nested repo '{}'",
-                parent_alias,
-                alias
+                escape(&parent_alias),
+                escape(alias)
             );
             to_add.push((parent_alias, parent_source, branch));
         }
@@ -893,6 +978,40 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&out.stderr)
         );
+    }
+
+    #[test]
+    fn roll_back_deletes_a_set_whose_records_were_not_all_written() {
+        let tmp = tempfile::tempdir().unwrap();
+        let set = tmp.path().join("set");
+        for (repo, wt) in [("root", set.clone()), ("leaf", set.join("leaf"))] {
+            let source = tmp.path().join(repo);
+            std::fs::create_dir(&source).unwrap();
+            git(&source, &["init", "-q"]);
+            git(&source, &["commit", "-q", "--allow-empty", "-m", "init"]);
+            git(
+                &source,
+                &["worktree", "add", "-q", "-b", repo, wt.to_str().unwrap()],
+            );
+        }
+        // The root was recorded; the leaf's record write failed
+        let set_record = SetRecord {
+            set: set.canonicalize().unwrap(),
+            project: tmp.path().to_path_buf(),
+            created_at: Utc::now().to_rfc3339(),
+            ephemeral: false,
+            ttl_seconds: None,
+            custom: HashMap::new(),
+        };
+        record::write(&linked_worktree_admin_dir(&set).unwrap(), &set_record).unwrap();
+        assert_eq!(
+            check_worktree_removal(&set).unwrap().missing_records.len(),
+            1
+        );
+
+        let err = roll_back(&set, &[], anyhow::anyhow!("record write failed"));
+        assert_eq!(format!("{err:#}"), "record write failed");
+        assert!(!set.exists());
     }
 
     #[test]

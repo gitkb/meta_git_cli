@@ -67,22 +67,26 @@ pub(crate) fn handle_add(args: AddArgs, verbose: bool, json: bool) -> Result<()>
             }
             continue;
         }
-        if existing.iter().any(|r| same_place(&r.alias, &place)) {
+        // A checkout already in the worktree (such as the root repo's) may
+        // hold a symlink where this one goes; git must not follow it out
+        let dest = dest_in_set(&wt_dir, &place).map_err(|why| {
+            anyhow::anyhow!(
+                "Refusing to add the worktree for '{}': {why}",
+                escape(&spec.alias)
+            )
+        })?;
+        // There already, under its place or where a link there leads
+        let real = |path: &std::path::Path| path.canonicalize().ok();
+        if existing.iter().any(|r| {
+            same_place(&r.alias, &place)
+                || (real(&r.path).is_some() && real(&r.path) == real(&dest))
+        }) {
             anyhow::bail!(
                 "Repo '{}' already exists in worktree '{}'",
                 escape(&spec.alias),
                 escape(name)
             );
         }
-
-        // A checkout already in the worktree (such as the root repo's) may
-        // hold a symlink where this one goes; git must not follow it out
-        dest_in_set(&wt_dir, &place).map_err(|why| {
-            anyhow::anyhow!(
-                "Refusing to add the worktree for '{}': {why}",
-                escape(&spec.alias)
-            )
-        })?;
         planned.push((spec, source, place));
     }
 

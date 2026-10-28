@@ -815,6 +815,26 @@ fn build_nested_dep_graph(meta_dir: &std::path::Path) -> Result<DependencyGraph>
     DependencyGraph::build(project_deps)
 }
 
+/// The source of the project at `place` from `meta_dir`, reading only the
+/// configs of the meta repos on the way to it.
+fn project_at(meta_dir: &std::path::Path, place: &str) -> Result<Option<std::path::PathBuf>> {
+    let Some((config, _)) = meta_core::config::find_meta_config_in(meta_dir)? else {
+        return Ok(None);
+    };
+    let (projects, _) = meta_core::config::parse_meta_config(&config)?;
+    for project in &projects {
+        if project.path == place {
+            return Ok(Some(meta_dir.join(&project.path)));
+        }
+        if let Some(rest) = place.strip_prefix(&format!("{}/", project.path)) {
+            if let Some(found) = project_at(&meta_dir.join(&project.path), rest)? {
+                return Ok(Some(found));
+            }
+        }
+    }
+    Ok(None)
+}
+
 /// Ensure intermediate `meta: true` parent repos get worktrees for nested aliases.
 ///
 /// When `repos_to_create` contains a nested alias like `"gitkb/core"`, the
@@ -840,18 +860,6 @@ fn ensure_intermediate_parents(
     let mut to_add: Vec<(String, std::path::PathBuf, String)> = Vec::new();
     let mut added: HashSet<String> = HashSet::new();
 
-    // Only a nested place reads the nested configs
-    let tree = if existing.iter().any(|place| place.contains('/')) {
-        meta_core::config::walk_meta_tree(meta_dir, None)?
-    } else {
-        Vec::new()
-    };
-    let projects_by_place: std::collections::HashMap<String, std::path::PathBuf> =
-        meta_core::config::build_project_map(&tree, meta_dir, "")
-            .into_iter()
-            .map(|(place, (source, _))| (place, source))
-            .collect();
-
     for (alias, source, _branch) in &repos {
         // Only a repo nested in the set needs its parents: they follow from
         // where it goes, not from its name
@@ -874,7 +882,7 @@ fn ensure_intermediate_parents(
             // A parent is the project at that path, not one by that name; a
             // repo the workspace doesn't list is not added (remove would
             // refuse it as foreign)
-            let Some(parent_source) = projects_by_place.get(&parent_alias).cloned() else {
+            let Some(parent_source) = project_at(meta_dir, &parent_alias)? else {
                 log::warn!(
                     "Intermediate parent '{}' for nested repo '{}' is not a project of the workspace, skipping",
                     escape(&parent_alias),
